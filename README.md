@@ -10,7 +10,24 @@
 
 ## 下载
 
-**菜单栏应用**（macOS 14+）：
+### 一行安装（推荐）
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/main/install.sh | sh
+```
+
+脚本会：取最新版本 → 下载 dmg → 装进 `/Applications` → **去掉隔离属性** → 启动。
+隔离属性那一步是必需的，不然首次打开还是会被 Gatekeeper 拦。
+
+不想直接管道执行的话，可以先看一眼再跑：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/main/install.sh | less
+# 或者钉住某个版本，而不是跟着 main 走：
+curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/v0.3.0/install.sh | sh
+```
+
+### 手动安装
 
 [Volfree-0.3.0.dmg](https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/Volfree-0.3.0.dmg)
 — 打开后把 Volfree 拖进「应用程序」。
@@ -22,9 +39,9 @@
 > 1. 在「应用程序」里**右键点 Volfree → 打开**，弹窗里再点一次「打开」
 > 2. 或者跑一次 `xattr -cr /Applications/Volfree.app`
 >
-> 之后就能正常双击打开了。
+> 之后就能正常双击打开了。用上面的一行安装可以跳过这一步。
 
-**命令行**（零依赖，有 Python 3 即可）：
+### 命令行版
 
 [volfree.py](https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/volfree.py)
 — 单个文件，没有任何签名问题。
