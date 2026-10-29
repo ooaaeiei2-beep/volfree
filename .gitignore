@@ -1,0 +1,10 @@
+# Swift / SPM 构建产物
+app/.build/
+app/build/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store

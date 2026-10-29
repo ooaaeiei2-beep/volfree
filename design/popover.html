@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>volfree · 菜单栏面板原型</title>
+<style>
+:root{
+  --glass: rgba(246,246,248,0.70);
+  --glass-solid: rgba(243,243,245,0.94);
+  --glass-border: rgba(255,255,255,0.60);
+  --hairline: rgba(0,0,0,0.09);
+  --text: #1d1d1f;
+  --text-2: rgba(0,0,0,0.60);
+  --text-3: rgba(0,0,0,0.36);
+  --hover: rgba(0,0,0,0.05);
+  --fill-1: rgba(255,255,255,0.92);
+  --fill-3: rgba(0,0,0,0.055);
+  --accent: #0071e3;
+  --c-safe: #1b6b2f;
+  --c-caution: #7d4900;
+  --c-danger: #b02a22;
+  --bg-safe: rgba(52,199,89,0.11);
+  --bg-caution: rgba(255,159,10,0.13);
+  --bg-danger: rgba(255,59,48,0.10);
+  --tone: var(--c-caution);
+  --tone-bg: var(--bg-caution);
+  --danger: #b02a22;
+  --danger-solid: #d3322a;
+  --danger-bg: rgba(255,59,48,0.10);
+  --desk: #cdd6e2;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --glass: rgba(40,40,44,0.68);
+    --glass-solid: rgba(44,44,48,0.94);
+    --glass-border: rgba(255,255,255,0.13);
+    --hairline: rgba(255,255,255,0.10);
+    --text: #f5f5f7;
+    --text-2: rgba(255,255,255,0.62);
+    --text-3: rgba(255,255,255,0.38);
+    --hover: rgba(255,255,255,0.07);
+    --fill-1: rgba(255,255,255,0.15);
+    --fill-3: rgba(255,255,255,0.09);
+    --accent: #0a70da;
+    --c-safe: #30d158;
+    --c-caution: #ffc53d;
+    --c-danger: #ff7b73;
+    --bg-safe: rgba(48,209,88,0.13);
+    --bg-caution: rgba(255,159,10,0.15);
+    --bg-danger: rgba(255,69,58,0.14);
+    --tone: var(--c-caution);
+    --tone-bg: var(--bg-caution);
+    --danger: #ff6961;
+    --danger-solid: #cf352b;
+    --danger-bg: rgba(255,69,58,0.14);
+    --desk: #14161c;
+  }
+}
+*{ box-sizing: border-box; }
+html,body{ height:100%; }
+body{
+  margin:0;
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", system-ui, sans-serif;
+  color: var(--text);
+  background-color: var(--desk);
+  background-image:
+    radial-gradient(1000px 620px at 16% 6%, rgba(146,178,220,0.85), transparent 62%),
+    radial-gradient(820px 540px at 84% 78%, rgba(193,164,207,0.75), transparent 60%),
+    radial-gradient(700px 460px at 58% 14%, rgba(228,218,201,0.55), transparent 66%);
+  -webkit-font-smoothing: antialiased;
+  display:flex; align-items:center; justify-content:center;
+  padding: 48px 24px 110px;
+}
+@media (prefers-color-scheme: dark){
+  body{
+    background-image:
+      radial-gradient(1000px 620px at 16% 6%, rgba(38,58,92,0.85), transparent 62%),
+      radial-gradient(820px 540px at 84% 78%, rgba(64,44,78,0.8), transparent 60%),
+      radial-gradient(700px 460px at 58% 14%, rgba(50,48,44,0.6), transparent 66%);
+  }
+}
+
+.stage{ display:flex; align-items:flex-start; gap:40px; }
+@media (max-width: 800px){ .stage{ flex-direction:column; align-items:center; gap:28px; } }
+
+.col{ position:relative; width:340px; padding-top:34px; flex:none; }
+
+.status-item{
+  position:absolute; top:0; right:18px; width:20px; height:20px;
+  display:grid; place-items:center; border-radius:5px;
+  background: var(--fill-1); color: var(--text);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+}
+
+.popover{
+  position:relative; width:340px; padding:12px 12px 8px;
+  border-radius:14px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  backdrop-filter: blur(30px) saturate(180%);
+  box-shadow: 0 14px 36px rgba(0,0,0,0.18), 0 2px 6px rgba(0,0,0,0.10),
+              inset 0 0 0 0.5px var(--glass-border);
+}
+.arrow{
+  position:absolute; top:-7px; right:21px; width:14px; height:8px;
+  background: var(--glass);
+  clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+}
+
+.head{ display:flex; align-items:center; gap:10px; padding:2px 4px 11px; }
+.vol-icon{
+  width:30px; height:30px; border-radius:8px; flex:none;
+  display:grid; place-items:center;
+  background: linear-gradient(158deg,#7897bd,#48688f);
+  box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.35);
+}
+.vol-name{ font-size:13px; font-weight:600; letter-spacing:-0.01em; line-height:1.25; }
+.vol-meta{ font-size:11px; color: var(--text-2); line-height:1.3; margin-top:1px; }
+
+.sep{ height:1px; background: var(--hairline); margin:0 -12px; }
+
+.verdict{ margin:11px 0 11px; padding:10px 12px; border-radius:10px; background: var(--tone-bg); }
+.v-row{ display:flex; align-items:center; gap:8px; }
+.dot{
+  width:9px; height:9px; border-radius:50%; flex:none;
+  background: var(--tone);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone) 16%, transparent);
+}
+.v-text{ font-size:14px; font-weight:600; letter-spacing:-0.01em; color: var(--tone); }
+.v-reason{ margin-top:5px; padding-left:17px; font-size:11.5px; color: var(--text-2); }
+.verdict.pulse .dot{ animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse{ 0%,100%{ opacity:1 } 50%{ opacity:.28 } }
+
+.primary{
+  width:100%; height:30px; border:0; border-radius:8px; font:inherit;
+  font-size:13px; font-weight:590; color:#fff; background: var(--accent);
+  cursor:pointer; letter-spacing:-0.01em;
+  transition: transform .12s ease-out, background-color .16s ease;
+}
+.primary:hover{ background: color-mix(in srgb, var(--accent) 92%, #000); }
+.primary:active{ transform: scale(.985); }
+.primary:disabled{ background: var(--fill-3); color: var(--text-2); cursor:default; transform:none; }
+.primary:focus-visible{ outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent); outline-offset:1px; }
+
+.disclose{
+  margin-top:7px; width:100%; height:26px; border:0; border-radius:6px;
+  background: transparent; font:inherit; font-size:11.5px; color: var(--text-2);
+  display:flex; align-items:center; gap:6px; padding:0 5px; cursor:pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.disclose:hover{ background: var(--hover); color: var(--text); }
+.disclose:focus-visible{ outline:3px solid color-mix(in srgb, var(--accent) 34%, transparent); outline-offset:0; }
+.disclose[hidden]{ display:none; }
+.chev{ width:8px; height:8px; flex:none; transition: transform .3s cubic-bezier(.32,.72,0,1); }
+.disclose[aria-expanded="true"] .chev{ transform: rotate(90deg); }
+
+.detail-wrap{
+  display:grid; grid-template-rows:0fr;
+  transition: grid-template-rows .32s cubic-bezier(.32,.72,0,1);
+}
+.detail-wrap.open{ grid-template-rows:1fr; }
+.detail{ overflow:hidden; min-height:0; }
+.detail-inner{ padding:4px 0 2px; }
+
+.plist{ margin:0; padding:0; list-style:none; }
+.proc{
+  display:flex; align-items:center; gap:8px; height:32px;
+  padding:0 6px; border-radius:6px; transition: background-color .12s ease;
+}
+.proc:hover{ background: var(--hover); }
+.ico{
+  width:18px; height:18px; border-radius:4px; flex:none;
+  display:grid; place-items:center; color:#fff;
+}
+.nm{ flex:1 1 auto; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.tg{ flex:none; font-size:11px; color: var(--text-2); }
+.tg.mark{
+  font-size:10.5px; color: var(--text); background: var(--fill-3);
+  padding:1px 6px; border-radius:4px;
+}
+.tg.warn{ color: var(--tone); }
+.tg.mark.warn{
+  color: var(--tone);
+  background: color-mix(in srgb, var(--tone) 13%, transparent);
+}
+.proc.risky .tg{ color: var(--danger); }
+.end{
+  flex:none; border:0; background:transparent; font:inherit; font-size:10.5px;
+  color: var(--text-2); padding:2px 6px; border-radius:5px; cursor:pointer;
+  transition: background-color .12s ease, color .12s ease;
+}
+.end:hover{ background: var(--danger-bg); color: var(--danger); }
+.end:focus-visible{ outline:2px solid color-mix(in srgb, var(--danger) 40%, transparent); }
+
+.confirm{ padding:9px 9px 8px; border-radius:8px; background: var(--danger-bg); }
+.confirm.soft{
+  background: var(--fill-3);
+  box-shadow: inset 3px 0 0 var(--tone);
+  padding-left:11px;
+  margin-top:6px;
+}
+#pconfirm{ display:none; }
+#pconfirm.on{ display:block; }
+.confirm .q{ font-size:11.5px; line-height:1.45; text-wrap: pretty; }
+.confirm .acts{ display:flex; justify-content:flex-end; gap:6px; margin-top:8px; }
+.btn-sm{
+  height:22px; padding:0 10px; border:0; border-radius:6px; font:inherit;
+  font-size:11px; cursor:pointer; transition: transform .1s ease-out;
+}
+.btn-sm:active{ transform: scale(.96); }
+.btn-sm.ghost{ background: var(--fill-3); color: var(--text); }
+.confirm.soft .btn-sm.ghost{
+  background: var(--fill-1);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+}
+.btn-sm.danger{ background: var(--danger-solid); color:#fff; }
+.btn-sm:focus-visible{ outline:2px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+
+.foot{
+  display:flex; align-items:center; justify-content:space-between;
+  margin-top:4px; padding-top:8px; border-top:1px solid var(--hairline);
+}
+.foot button{
+  border:0; background:transparent; font:inherit; font-size:11px; color: var(--text-2);
+  padding:3px 6px; border-radius:5px; cursor:pointer; display:flex; align-items:center; gap:5px;
+  transition: background-color .12s ease, color .12s ease;
+}
+.foot button:hover{ background: var(--hover); color: var(--text); }
+.foot button:focus-visible{ outline:2px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+
+.notes{
+  width:320px; flex:none; padding:16px 18px 14px; border-radius:14px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: inset 0 0 0 0.5px var(--glass-border), 0 10px 28px rgba(0,0,0,0.10);
+}
+.notes h2{ margin:0 0 2px; font-size:13px; font-weight:600; color: var(--tone); }
+.notes .sub{ font-size:10.5px; color: var(--text-3); margin-bottom:10px; }
+.notes ul{ margin:0; padding:0; list-style:none; }
+.notes li{
+  position:relative; font-size:11.5px; line-height:1.6; color: var(--text-2);
+  padding:5px 0 5px 13px;
+}
+.notes li::before{
+  content:""; position:absolute; left:2px; top:12px;
+  width:4px; height:4px; border-radius:50%; background: var(--tone); opacity:.75;
+}
+.notes li strong{ color: var(--text); font-weight:590; }
+
+.switcher{
+  position:fixed; left:50%; bottom:26px; transform:translateX(-50%);
+  display:flex; gap:2px; padding:3px; border-radius:9px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: inset 0 0 0 0.5px var(--glass-border), 0 8px 22px rgba(0,0,0,0.14);
+}
+.switcher button{
+  border:0; background:transparent; font:inherit; font-size:11.5px; color: var(--text-2);
+  padding:5px 14px; border-radius:7px; cursor:pointer; display:flex; align-items:center; gap:6px;
+  transition: background-color .15s ease, color .15s ease;
+}
+.switcher button[aria-pressed="true"]{
+  background: var(--fill-1); color: var(--text);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.12), inset 0 0 0 0.5px var(--hairline);
+}
+.switcher button:focus-visible{ outline:2px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+.switcher .d{ width:7px; height:7px; border-radius:50%; }
+
+.caption{
+  position:fixed; left:24px; bottom:28px; font-size:10.5px; color: var(--text-3);
+}
+
+@media (prefers-reduced-motion: reduce){
+  *{ transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
+@media (prefers-reduced-transparency: reduce){
+  .popover, .notes, .switcher{ background: var(--glass-solid); -webkit-backdrop-filter:none; backdrop-filter:none; }
+}
+@media (prefers-contrast: more){
+  .popover, .notes, .switcher{ background: var(--glass-solid); -webkit-backdrop-filter:none; backdrop-filter:none; }
+  .sep, .foot{ border-color: var(--text-3); }
+}
+</style>
+</head>
+<body>
+
+<main class="stage">
+  <div class="col">
+    <div class="status-item" aria-hidden="true">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+        <rect x="3" y="7" width="18" height="10" rx="2.6" fill="currentColor" opacity=".9"/>
+        <circle cx="17.4" cy="12" r="1.3" fill="#2C6FD1"/>
+      </svg>
+    </div>
+
+    <div class="popover" role="dialog" aria-label="volfree 磁盘面板">
+      <div class="arrow" aria-hidden="true"></div>
+
+      <div class="head">
+        <div class="vol-icon" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+            <rect x="3" y="7" width="18" height="10" rx="2.6" fill="#fff" opacity=".94"/>
+            <circle cx="17.4" cy="12" r="1.2" fill="#33578a"/>
+          </svg>
+        </div>
+        <div>
+          <div class="vol-name">My Passport</div>
+          <div class="vol-meta">1.0 TB / 1.8 TB · exFAT · 外接</div>
+        </div>
+      </div>
+
+      <div class="sep"></div>
+
+      <div class="verdict" id="verdict" aria-live="polite">
+        <div class="v-row">
+          <span class="dot" aria-hidden="true"></span>
+          <span class="v-text" id="vtext">可以安全推出</span>
+        </div>
+        <div class="v-reason" id="vreason">3 个程序占着，但都不在写入</div>
+      </div>
+
+      <button class="primary" id="primary" aria-controls="pconfirm" aria-expanded="false">安全结束并推出</button>
+
+      <div class="confirm soft" id="pconfirm" role="group" aria-label="确认放弃写入">
+        <div class="q" id="pconfirmQ">会放弃 1 次写入，且该文件已无名字、无法从别处找回。</div>
+        <div class="acts">
+          <button class="btn-sm ghost" id="pcancel">取消</button>
+          <button class="btn-sm danger" id="pok">仍然结束</button>
+        </div>
+      </div>
+
+      <button class="disclose" id="disclose" aria-expanded="false" aria-controls="detailwrap">
+        <svg class="chev" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+          <path d="M3 1.5L6.5 5L3 8.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span id="dlabel">查看 3 个程序</span>
+      </button>
+
+      <div class="detail-wrap" id="detailwrap">
+        <div class="detail">
+          <div class="detail-inner">
+            <ul class="plist" id="plist"></ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="foot">
+        <button type="button">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 5.4A2.6 2.6 0 1 0 8 10.6 2.6 2.6 0 0 0 8 5.4zm0-4.2l.7 1.9 1.6-.7 1.2 1.2-.7 1.6 1.9.7v1.7l-1.9.7.7 1.6-1.2 1.2-1.6-.7-.7 1.9H7.3l-.7-1.9-1.6.7-1.2-1.2.7-1.6L2.6 8.7V7l1.9-.7-.7-1.6 1.2-1.2 1.6.7L7.3 1.2z"/>
+          </svg>
+          设置
+        </button>
+        <button type="button" id="rescan">重新检查</button>
+      </div>
+    </div>
+  </div>
+
+  <aside class="notes">
+    <h2 id="notesTitle">黄 · 可以安全推出</h2>
+    <div class="sub">这一态的取舍</div>
+    <ul id="notesList"></ul>
+  </aside>
+</main>
+
+<div class="switcher" role="group" aria-label="演示状态切换">
+  <button type="button" data-state="safe" aria-pressed="false"><span class="d" style="background:#34c759"></span>绿 · 无占用</button>
+  <button type="button" data-state="caution" aria-pressed="true"><span class="d" style="background:#ff9f0a"></span>黄 · 可结束占用</button>
+  <button type="button" data-state="danger" aria-pressed="false"><span class="d" style="background:#ff3b30"></span>红 · 正在写入</button>
+</div>
+
+<div class="caption">volfree · 菜单栏面板原型 · Esc 收起详情</div>
+
+<script>
+const GLYPH = {
+  doc: '<path d="M4.2 1.6h4.9L13 5.5v8.9H4.2z"/>',
+  folder: '<path d="M1.9 4.3h4.3l1.3 1.5h6.6v7H1.9z"/>',
+  eye: '<path d="M8 3.5c3.3 0 5.8 3 6.4 4.5-.6 1.5-3.1 4.5-6.4 4.5S2.2 9.5 1.6 8C2.2 6.5 4.7 3.5 8 3.5z" opacity=".38"/><circle cx="8" cy="8" r="2.1"/>',
+  film: '<rect x="1.9" y="3.2" width="12.2" height="9.6" rx="1.6" opacity=".38"/><rect x="4.5" y="3.2" width="1.2" height="9.6"/><rect x="10.3" y="3.2" width="1.2" height="9.6"/>'
+};
+
+function svg(g){
+  return '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">' + GLYPH[g] + '</svg>';
+}
+
+const SCENARIOS = {
+  safe: { procs: [] },
+  caution: {
+    procs: [
+      { id:'ofd',    name:'OFD 缩略图', pid:3424, tag:'已删除·只读', mark:true, glyph:'doc', color:'#8E8E93', level:'safe' },
+      { id:'finder', name:'访达',       pid:512,  tag:'只读',       glyph:'folder', color:'#4A90D9', level:'safe' },
+      { id:'tmp',    name:'Python',     pid:4471, tag:'已删除·写入中', mark:true, warn:true, unlinkedWrite:true, glyph:'doc', color:'#B08968', level:'caution' }
+    ]
+  },
+  danger: {
+    procs: [
+      { id:'fcp', name:'Final Cut Pro', pid:2210, tag:'写入中 12.4 MB/s', glyph:'film', color:'#3A3A3C', level:'risky', rate:'12.4 MB/s' }
+    ]
+  }
+};
+
+const NOTES = {
+  safe: [
+    '<strong>主按钮直接是「推出」</strong>，不追问。零占用时再弹一次确认，只会训练用户盲点。',
+    '<strong>详情入口整条消失</strong>，而不是灰掉。没东西可看就不该占位。',
+    '<strong>容量与格式常驻</strong>在盘名下方，用来确认推的是这一块。'
+  ],
+  caution: [
+    '<strong>按钮文案先交代后果。</strong>「安全结束并推出」比「推出」多说了会发生什么。',
+    '<strong>理由行给出判据。</strong>「都不在写入」是能安全结束的依据，不是免责声明。',
+    '<strong>「已删除」要分两种。</strong>「已删除·只读」结束掉零风险；「已删除·写入中」是 mkstemp+unlink，结束会放弃一次写入、文件已无名可寻，所以主按钮先软确认一次。',
+    '<strong>判据不依赖 link count。</strong>exFAT 的 fskit 驱动对已删除文件仍报 link=1，lsof 的 +L1 会假绿；这里改用路径校验。',
+    '<strong>进程清单默认收起。</strong>它服务「我不信，我要自己看」，不是「请你判断」。'
+  ],
+  danger: [
+    '<strong>主按钮禁用为「等待完成」。</strong>危险动作不在主层级出现。',
+    '<strong>强制入口改名为「仍要结束…」</strong>，展开后逐项确认，一次只能结束一个。',
+    '<strong>写入速率给出来。</strong>用户能自己判断还要等多久，而不是被告知「有风险」。',
+    '<strong>结束后状态自动重算</strong>，不需要手动刷新。'
+  ]
+};
+
+const $ = id => document.getElementById(id);
+let current = 'caution';
+let procs = SCENARIOS.caution.procs.map(p => ({...p}));
+let expanded = false;
+let confirmingId = null;
+let scanning = false;
+let pendingPrimary = false;
+
+function tone(){
+  if (procs.some(p => p.level === 'risky')) return 'danger';
+  return procs.length ? 'caution' : 'safe';
+}
+
+function renderList(){
+  const ul = $('plist');
+  ul.innerHTML = procs.map(p => {
+    if (p.id === confirmingId){
+      const q = p.unlinkedWrite
+        ? '结束 ' + p.name + '？会放弃这次写入，该文件已无名字、无法找回。'
+        : '结束 ' + p.name + '？未保存的内容会丢失。';
+      return '<li class="confirm' + (p.unlinkedWrite ? ' soft' : '') + '" role="group" aria-label="确认结束进程">' +
+        '<div class="q">' + q + '</div>' +
+        '<div class="acts">' +
+          '<button class="btn-sm ghost" data-cancel="1">取消</button>' +
+          '<button class="btn-sm danger" data-end="' + p.id + '">结束</button>' +
+        '</div></li>';
+    }
+    const endBtn = (p.level === 'risky' || p.unlinkedWrite)
+      ? '<button class="end" data-ask="' + p.id + '">结束…</button>' : '';
+    return '<li class="proc ' + (p.level === 'risky' ? 'risky' : '') + '">' +
+      '<span class="ico" style="background:' + p.color + '">' + svg(p.glyph) + '</span>' +
+      '<span class="nm">' + p.name + '</span>' +
+      '<span class="tg' + (p.mark ? ' mark' : '') + (p.warn ? ' warn' : '') + '">' + p.tag + '</span>' + endBtn + '</li>';
+  }).join('');
+}
+
+function render(){
+  const t = tone();
+  const root = document.documentElement;
+  root.style.setProperty('--tone', 'var(--c-' + t + ')');
+  root.style.setProperty('--tone-bg', 'var(--bg-' + t + ')');
+
+  const verdict = $('verdict');
+  verdict.className = 'verdict' + (scanning ? ' pulse' : '');
+
+  if (scanning){
+    $('vtext').textContent = '正在检查…';
+    $('vreason').textContent = '重新扫描这块磁盘的占用进程';
+    $('primary').textContent = '检查中';
+    $('primary').disabled = true;
+    $('disclose').hidden = true;
+  } else {
+    const n = procs.length;
+    if (t === 'safe'){
+      $('vtext').textContent = '可以拔了';
+      $('vreason').textContent = '没有程序占用这块磁盘';
+      $('primary').textContent = '推出';
+      $('primary').disabled = false;
+    } else if (t === 'caution'){
+      const abandoned = procs.filter(p => p.unlinkedWrite).length;
+      if (abandoned){
+        $('vtext').textContent = '可以推出';
+        $('vreason').textContent = n + ' 个程序占着，其中 ' + abandoned + ' 个正在写已删除的临时文件';
+        $('primary').textContent = '结束并推出';
+      } else {
+        $('vtext').textContent = '可以安全推出';
+        $('vreason').textContent = n + ' 个程序占着，但都不在写入';
+        $('primary').textContent = '安全结束并推出';
+      }
+      $('primary').disabled = false;
+    } else {
+      const risky = procs.filter(p => p.level === 'risky');
+      $('vtext').textContent = '先别拔';
+      $('vreason').textContent = risky.length === 1
+        ? risky[0].name + ' 正在写入 ' + risky[0].rate
+        : risky.length + ' 个程序正在写入';
+      $('primary').textContent = '等待完成';
+      $('primary').disabled = true;
+    }
+
+    if (n === 0){
+      $('disclose').hidden = true;
+      expanded = false;
+      $('detailwrap').classList.remove('open');
+    } else {
+      $('disclose').hidden = false;
+      $('dlabel').textContent = t === 'danger' ? '仍要结束…' : '查看 ' + n + ' 个程序';
+    }
+    $('disclose').setAttribute('aria-expanded', String(expanded));
+  }
+
+  const abandoned = procs.filter(p => p.unlinkedWrite).length;
+  if (t !== 'caution' && pendingPrimary) hideConfirm(false);
+  $('notesTitle').textContent = t === 'safe' ? '绿 · 可以拔了'
+    : t === 'caution'
+      ? (abandoned ? '黄 · 可以推出，但会放弃写入' : '黄 · 可以安全推出')
+      : '红 · 先别拔';
+  $('notesList').innerHTML = NOTES[t].map(s => '<li>' + s + '</li>').join('');
+  renderList();
+}
+
+function setExpanded(v){
+  expanded = v;
+  $('detailwrap').classList.toggle('open', v);
+  $('disclose').setAttribute('aria-expanded', String(v));
+  if (!v) confirmingId = null, renderList();
+}
+
+$('disclose').addEventListener('click', () => setExpanded(!expanded));
+
+$('plist').addEventListener('click', e => {
+  const ask = e.target.closest('[data-ask]');
+  if (ask){ confirmingId = ask.dataset.ask; renderList(); return; }
+  const cancel = e.target.closest('[data-cancel]');
+  if (cancel){ confirmingId = null; renderList(); return; }
+  const end = e.target.closest('[data-end]');
+  if (end){
+    procs = procs.filter(p => p.id !== end.dataset.end);
+    confirmingId = null;
+    hideConfirm(false);
+    // 列表空了 render() 会自动收起详情；黄态杀掉临时文件后仍有两个进程，保持展开
+    render();
+  }
+});
+
+function showConfirm(n){
+  pendingPrimary = true;
+  $('pconfirmQ').textContent = n > 1
+    ? '会放弃 ' + n + ' 次写入，且这些文件已无名字、无法从别处找回。'
+    : '会放弃 1 次写入，且该文件已无名字、无法从别处找回。';
+  $('pconfirm').classList.add('on');
+  $('primary').setAttribute('aria-expanded', 'true');
+  $('pcancel').focus();
+}
+
+function hideConfirm(refocus){
+  if (!pendingPrimary && !$('pconfirm').classList.contains('on')) return;
+  pendingPrimary = false;
+  $('pconfirm').classList.remove('on');
+  $('primary').setAttribute('aria-expanded', 'false');
+  if (refocus) $('primary').focus();
+}
+
+function eject(){
+  hideConfirm(false);
+  $('primary').textContent = '正在推出…';
+  setTimeout(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--tone', 'var(--c-safe)');
+    root.style.setProperty('--tone-bg', 'var(--bg-safe)');
+    $('vtext').textContent = '已推出';
+    $('vreason').textContent = '可以安全拔线';
+    $('primary').textContent = '已推出';
+    $('primary').disabled = true;
+  }, 600);
+}
+
+$('primary').addEventListener('click', () => {
+  if ($('primary').disabled) return;
+  const abandoned = procs.filter(p => p.unlinkedWrite).length;
+  if (abandoned){
+    if (pendingPrimary) return;
+    showConfirm(abandoned);
+    return;
+  }
+  eject();
+});
+
+$('pcancel').addEventListener('click', () => hideConfirm(true));
+$('pok').addEventListener('click', () => { if (pendingPrimary) eject(); });
+
+$('rescan').addEventListener('click', () => {
+  hideConfirm(false);
+  scanning = true; render();
+  setTimeout(() => { scanning = false; render(); }, 700);
+});
+
+document.querySelectorAll('.switcher button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    current = btn.dataset.state;
+    document.querySelectorAll('.switcher button').forEach(b =>
+      b.setAttribute('aria-pressed', String(b === btn)));
+    procs = SCENARIOS[current].procs.map(p => ({...p}));
+    expanded = false; confirmingId = null; scanning = false;
+    hideConfirm(false);
+    $('detailwrap').classList.remove('open');
+    render();
+  });
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (pendingPrimary){ hideConfirm(true); }
+  else if (confirmingId){ confirmingId = null; renderList(); }
+  else if (expanded) setExpanded(false);
+});
+
+render();
+</script>
+</body>
+</html>
