@@ -30,6 +30,11 @@ dmg 里是 `Volfree.app` 加一个指向 `/Applications` 的软链。**只打包
 本机没有 Developer ID 证书，app 是 adhoc 签名的，下载方首次打开会被 Gatekeeper 拦，
 处理办法写在仓库根 README 的「下载」一节。
 
+> 验证时别被 `spctl -a` 误导：adhoc 签名的 app **即使清掉隔离属性，`spctl -a` 仍报 rejected**，
+> 因为 Gatekeeper 评估要求 Developer ID，和隔离属性是两回事。
+> 真正的判据是能不能启动——实测 `xattr -cr` 之后 `open` 能正常拉起，
+> `codesign -vvv` 也是 `valid on disk`。
+
 ## 想亲眼看一眼红态
 
 手上没有「正在被写的移动硬盘」时，用这个造一块：
