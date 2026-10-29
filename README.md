@@ -8,6 +8,32 @@
 
 ![四态对照](app/shots/四态对照.png)
 
+## 下载
+
+**菜单栏应用**（macOS 14+）：
+
+[Volfree-0.3.0.dmg](https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/Volfree-0.3.0.dmg)
+— 打开后把 Volfree 拖进「应用程序」。
+
+> **首次打开会被系统拦下**，提示「无法验证开发者」或「已损坏」。**这不是文件坏了**：
+> 本项目没有 Apple 开发者账号（$99/年），app 只能用 adhoc 签名，过不了 Gatekeeper 校验。
+> 两种办法任选其一：
+>
+> 1. 在「应用程序」里**右键点 Volfree → 打开**，弹窗里再点一次「打开」
+> 2. 或者跑一次 `xattr -cr /Applications/Volfree.app`
+>
+> 之后就能正常双击打开了。
+
+**命令行**（零依赖，有 Python 3 即可）：
+
+[volfree.py](https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/volfree.py)
+— 单个文件，没有任何签名问题。
+
+```sh
+curl -LO https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/volfree.py
+python3 volfree.py
+```
+
 ## 它回答的问题
 
 | 颜色 | 含义 | 能不能拔 |

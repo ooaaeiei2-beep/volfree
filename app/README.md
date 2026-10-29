@@ -17,6 +17,19 @@ open build/Volfree.app     # 菜单栏出现一个硬盘图标
 `build.sh` 会把 `../volfree.py` 一起拷进 `Contents/Resources/`，
 所以打包后的 app 不依赖工作区路径。
 
+版本号只认一个来源：`../volfree.py` 里的 `VERSION`，构建时写进 `Info.plist`。
+（原先 `Resources/Info.plist` 写死 `0.1.0`，和 CLI 的版本对不上。）
+
+要发版就打 dmg：
+
+```sh
+./make_dmg.sh              # 产出 build/Volfree-<版本>.dmg
+```
+
+dmg 里是 `Volfree.app` 加一个指向 `/Applications` 的软链。**只打包不签名**——
+本机没有 Developer ID 证书，app 是 adhoc 签名的，下载方首次打开会被 Gatekeeper 拦，
+处理办法写在仓库根 README 的「下载」一节。
+
 ## 想亲眼看一眼红态
 
 手上没有「正在被写的移动硬盘」时，用这个造一块：

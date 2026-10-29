@@ -25,6 +25,16 @@ cp "$BIN" "$APP/Contents/MacOS/Volfree"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp ../volfree.py "$APP/Contents/Resources/volfree.py"
 
+# 版本号只认一个来源：volfree.py 里的 VERSION。
+# 原先 Resources/Info.plist 写死 0.1.0，和 CLI 的 0.3.0 对不上，发版时两个数字会打架。
+VER=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' ../volfree.py)
+if [ -n "$VER" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" "$APP/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" "$APP/Contents/Info.plist"
+else
+    echo "警告：没能从 ../volfree.py 读到 VERSION，沿用 Info.plist 里的旧值" >&2
+fi
+
 # 图标：由 make_icon.sh（内部编译 make_icon.swift）生成，缺了就直接报错，
 # 免得又 build 出一个没图标的 app
 if [ ! -f Resources/AppIcon.icns ]; then
