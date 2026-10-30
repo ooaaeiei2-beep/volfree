@@ -1,55 +1,29 @@
 # volfree
 
-移动硬盘「**现在能不能安全拔**」诊断工具。命令行 + macOS 菜单栏应用。
+移动硬盘「**现在能不能安全拔**」——拔了会不会丢数据。macOS 菜单栏应用 + 单文件命令行工具。
 
-不是看「有没有文件被打开」这么简单——macOS 的 `lsof` 不像 Linux 那样在已删除文件后标注
-`(deleted)`，路径照常显示；而 mmap 写入**不改变文件长度**，看 size 永远是零增长。
-这个工具处理的就是这些容易误判的情况。
+<p align="center">
+  <a href="https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/Volfree-0.3.0.dmg"><b>下载 Volfree-0.3.0.dmg</b></a><br>
+  <sub>1.2 MB · macOS 14 或更新 · 打开 dmg，把 Volfree 拖进「应用程序」</sub>
+</p>
 
-![四态对照](app/shots/四态对照.png)
+没有 Apple 开发者账号（$99/年），app 只能 adhoc 签名、过不了 Gatekeeper 校验——首次打开按下面三步走一次，之后双击就正常了。
 
-## 下载
+![首次打开的三步：右键点 app → 选「打开」→ 弹窗里再点一次「打开」](docs/img/install-steps.png)
 
-### 一行安装（推荐）
+## 界面
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/main/install.sh | sh
-```
+菜单栏图标三态——没插盘 / 没发现占用、有人占着、正在写入：
 
-脚本会：取最新版本 → 下载 dmg → 装进 `/Applications` → **去掉隔离属性** → 启动。
-隔离属性那一步是必需的，不然首次打开还是会被 Gatekeeper 拦。
+![菜单栏图标三态](docs/img/menubar-states.png)
 
-不想直接管道执行的话，可以先看一眼再跑：
+点开面板，谁占着、在不在写、写得有多快，逐条列出来：
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/main/install.sh | less
-# 或者钉住某个版本，而不是跟着 main 走：
-curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/v0.3.0/install.sh | sh
-```
+![面板展开后的进程列表](app/shots/05-黄-展开进程.png)
 
-### 手动安装
+设置里是权限范围、登录项和版本号：
 
-[Volfree-0.3.0.dmg](https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/Volfree-0.3.0.dmg)
-— 打开后把 Volfree 拖进「应用程序」。
-
-> **首次打开会被系统拦下**，提示「无法验证开发者」或「已损坏」。**这不是文件坏了**：
-> 本项目没有 Apple 开发者账号（$99/年），app 只能用 adhoc 签名，过不了 Gatekeeper 校验。
-> 两种办法任选其一：
->
-> 1. 在「应用程序」里**右键点 Volfree → 打开**，弹窗里再点一次「打开」
-> 2. 或者跑一次 `xattr -cr /Applications/Volfree.app`
->
-> 之后就能正常双击打开了。用上面的一行安装可以跳过这一步。
-
-### 命令行版
-
-[volfree.py](https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/volfree.py)
-— 单个文件，没有任何签名问题。
-
-```sh
-curl -LO https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/volfree.py
-python3 volfree.py
-```
+![设置窗口](app/shots/06b-设置.png)
 
 ## 它回答的问题
 
@@ -60,8 +34,52 @@ python3 volfree.py
 | 黄（放弃写入） | 写的是**已删除**的临时文件 | 结束会丢数据，且找不回来 |
 | 红 | 正在写入 | 等它写完 |
 
+![四态对照](app/shots/四态对照.png)
+
 权限受限时（没有「完全磁盘访问」），绿态文案会降级为「**未发现**占用」而不是「可以拔了」——
 「没有占用」和「看不到占用」这时无法区分，不替你下这个结论。
+
+不是看「有没有文件被打开」这么简单——macOS 的 `lsof` 不像 Linux 那样在已删除文件后标注
+`(deleted)`，路径照常显示；而 mmap 写入**不改变文件长度**，看 size 永远是零增长。
+这个工具处理的就是这些容易误判的情况。
+
+## 安装
+
+### 命令行版（单文件）
+
+[volfree.py](https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/volfree.py)
+— 单个文件，零依赖，没有任何签名问题。
+
+```sh
+curl -LO https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/volfree.py
+python3 volfree.py
+```
+
+### 进阶：一行脚本
+
+给愿意把脚本直接喂给 shell 的命令行用户。它会：取最新版本 → 下载 dmg → 装进 `/Applications`
+→ **去掉隔离属性** → 启动。隔离属性那一步是必需的，不去掉的话首次打开还是会被 Gatekeeper 拦，
+所以这条路能省掉首屏那三步。
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/main/install.sh | sh
+```
+
+不想直接管道执行的话，可以先看一眼再跑：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/main/install.sh | less
+# 或者钉住某个版本，而不是跟着 main 走：
+curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/v0.3.0/install.sh | sh
+```
+
+### 跳过那三步：清隔离属性
+
+已经装好、但不想每次新版本都右键一遍的话，清一次隔离属性即可（`install.sh` 做的就是这件事）：
+
+```sh
+xattr -cr /Applications/Volfree.app
+```
 
 ## 命令行
 
@@ -104,7 +122,7 @@ lsof 对 mmap 文件报的 `fd=txt` 条目 access 恒为空，得用
 |---|---|
 | `volfree.py` | 全部判定逻辑（约 1800 行，零依赖） |
 | `app/` | 菜单栏应用（SwiftUI + AppKit，SPM 构建）——**细节看 [app/README.md](app/README.md)** |
-| `docs/` | 判定依据与 22 例基准表 |
+| `docs/` | 判定依据与 22 例基准表；`docs/img/` 是 README 里的示意图 |
 | `design/` | 面板原型（HTML）与版式检查脚本 |
 | `experiments/` | 造测试场景的脚本（mmap 写入、已删除文件、各种文件系统） |
 | `tests/` | 86 项单元测试 |
