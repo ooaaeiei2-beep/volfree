@@ -42,6 +42,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -92,6 +93,9 @@ class Volume:
     # exFAT(fskit) 实测对已删除文件仍报 1，此时 lsof 的 +L1 完全失效，
     # 只能退化为路径校验。见 docs/文件系统语义核查.md
     link_count_reliable: Optional[bool] = None
+    # 本次扫描是否完整。lsof 超时、输出被截断、退出码异常都会置 False，
+    # 此时「未发现占用」不能当作结论——空列表也可能只是没扫完。
+    scan_complete: bool = True
 
     @property
     def display(self) -> str:
@@ -188,6 +192,13 @@ class Blocker:
     handles: list[Handle] = field(default_factory=list)
     level: str = "CAUTION"
     reason: str = ""
+    # 扫描时所在的卷身份。发信号前用它复核「此刻是否仍持有这个卷」——
+    # 扫描与处置之间进程可能已经关掉本卷句柄、PID 又被复用，
+    # 只校验 pid + 启动时间 + exe 挡不住这种情况。
+    device: str = ""
+    mountpoint: str = ""
+    # 属于其他用户（本工具无权终止）。由 assess 统一标注，处置环节据此跳过。
+    other_user: bool = False
 
     @property
     def real_handles(self) -> list[Handle]:
@@ -280,6 +291,78 @@ def run(cmd: list[str], timeout: float = 20.0) -> tuple[int, str, str]:
         return 127, "", f"命令不存在：{cmd[0]}"
     except OSError as exc:
         return 1, "", str(exc)
+
+
+# lsof 字段输出的体积上限。几十万文件的挂载点足以把 subprocess.run 的
+# 全量缓冲吃满内存；超限即截断并降级结论，绝不当作完整扫描。
+LSOF_OUTPUT_LIMIT = 32 * 1024 * 1024
+
+
+def capture_bounded(cmd: list[str], limit: int = LSOF_OUTPUT_LIMIT,
+                    timeout: float = 30.0) -> tuple[int, bytes, str, bool, bool]:
+    """执行子进程并限制 stdout 体积。
+
+    返回 (returncode, stdout, stderr, truncated, timed_out)。
+    `subprocess.run` 会把输出整段读进内存，没有上限；这里改成按块读，
+    越过 `limit` 立即杀掉子进程并置 truncated，调用方必须据此降级结论。
+
+    超时用 `wait(timeout=)` 单独看住——子进程若在写满管道后卡住，
+    单靠读循环里的时间戳判断不出来。
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out = bytearray()
+    err = bytearray()
+    state = {"truncated": False}
+
+    def read_stdout() -> None:
+        assert proc.stdout is not None
+        while True:
+            chunk = proc.stdout.read(65536)
+            if not chunk:
+                return
+            room = limit - len(out)
+            if len(chunk) > room:
+                out.extend(chunk[:room])
+                state["truncated"] = True
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                return
+            out.extend(chunk)
+
+    def read_stderr() -> None:
+        assert proc.stderr is not None
+        try:
+            err.extend(proc.stderr.read())
+        except (OSError, ValueError):
+            pass
+
+    readers = [threading.Thread(target=read_stdout, daemon=True),
+               threading.Thread(target=read_stderr, daemon=True)]
+    for t in readers:
+        t.start()
+
+    timed_out = False
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        code = proc.wait()
+
+    for t in readers:
+        t.join(1.0)
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            if pipe is not None:
+                pipe.close()
+        except OSError:
+            pass
+    return code, bytes(out), err.decode("utf-8", "replace"), state["truncated"], timed_out
 
 
 # ────────────────────────────── 卷枚举 ──────────────────────────────
@@ -523,24 +606,44 @@ def scan_blockers(volume: Volume) -> tuple[list[Blocker], list[str]]:
     # 字段 k：link count，0 表示已 unlink（APFS 可靠，exFAT 不可靠）
     cmd = ["lsof", "-nP", "+c", "0", "-F", "pcnfa0tk", volume.mountpoint]
     try:
-        p = subprocess.run(cmd, capture_output=True, timeout=30)
-        raw, code = p.stdout, p.returncode
-        err = p.stderr.decode("utf-8", "replace")
-    except subprocess.TimeoutExpired:
-        warnings.append("lsof 扫描超时（30 秒），结果可能不完整")
-        return [], warnings
+        code, raw, err, truncated, timed_out = capture_bounded(
+            cmd, LSOF_OUTPUT_LIMIT, 30.0)
     except FileNotFoundError:
+        volume.scan_complete = False
         warnings.append("未找到 lsof 命令，无法扫描占用")
         return [], warnings
     except OSError as exc:
+        volume.scan_complete = False
         warnings.append(f"lsof 调用失败：{exc}")
         return [], warnings
 
+    if timed_out:
+        volume.scan_complete = False
+        warnings.append("lsof 扫描超时（30 秒），结果可能不完整")
+        return [], warnings
+
+    if truncated:
+        # 截断后拿到的只是输出前缀，真正持有写入句柄的进程可能还在后面。
+        # 必须降级：此时的「未发现占用」不等于「可以拔」。
+        volume.scan_complete = False
+        warnings.append(
+            f"lsof 输出超过 {human_size(LSOF_OUTPUT_LIMIT)} 上限，已截断；"
+            "本次扫描不完整，不能据此判定可以拔出"
+        )
+
     # lsof 无匹配时退出码为 1，属正常
     if code not in (0, 1):
+        volume.scan_complete = False
         warnings.append(f"lsof 执行异常（退出码 {code}）：{err.strip()[:200]}")
 
     blockers = parse_lsof_field_output(raw)
+
+    # 记录扫描时的卷身份，供发信号前复核。
+    # 扫描到处置之间，进程可能已释放本卷句柄、PID 又被复用；
+    # 只校验 pid + 启动时间 + exe 挡不住「同一个进程换了个卷」。
+    for b in blockers:
+        b.device = volume.device
+        b.mountpoint = volume.mountpoint
 
     # stat 校验：识别「文件已删除但句柄未释放」
     for b in blockers:
@@ -570,6 +673,11 @@ def scan_blockers(volume: Volume) -> tuple[list[Blocker], list[str]]:
     # 探测该卷是否可靠上报 link count。
     # 判据：路径已经解析不到（exists=False），内核却仍报 link count >= 1。
     # 这是 exFAT(fskit) 的实测行为；出现即说明 +L1 在本卷不可用。
+    # 扫描不完整时不做这项推断：截断处的半个路径必然 stat 不到，
+    # 会伪造出「本卷 link count 不可靠」的假告警。
+    if not volume.scan_complete:
+        return blockers, warnings
+
     unreliable = [
         h for b in blockers for h in b.handles
         if h.exists is False and h.link_count is not None and h.link_count >= 1
@@ -947,7 +1055,7 @@ def scan_writable_mappings(pid: int) -> dict[str, bool]:
 
 
 # ────────────────────────────── 风险定级 ──────────────────────────────
-def assess(blocker: Blocker, self_pid: Optional[int] = None) -> Blocker:
+def _assess_level(blocker: Blocker, self_pid: Optional[int] = None) -> Blocker:
     """给单个占用进程定级并给出理由。
 
     判据是二维的：文件是否还有名字（link 状态）× 句柄是否可写。
@@ -1009,6 +1117,31 @@ def assess(blocker: Blocker, self_pid: Optional[int] = None) -> Blocker:
     blocker.level = "CAUTION"
     blocker.reason = "占用状态无法完全判定，建议先尝试正常退出该程序"
     return blocker
+
+
+def _apply_uid_policy(b: Blocker) -> Blocker:
+    """标注「属于其他用户」的进程——本工具无权终止，不必等到 EPERM 才发现。
+
+    刻意**不覆盖已有的写入等级**：正在写的进程必须继续显示为高风险，
+    否则会被读成「反正杀不掉，那就可以直接拔」——这正是产品要避免的误读。
+    只有「无写入」的情形才改判 NEVER：既没有数据风险、又无权终止，如实说明。
+    """
+    if b.uid < 0 or b.uid == os.getuid():
+        return b
+    b.other_user = True
+    if b.has_write:
+        b.reason = (f"{b.reason}；但该进程属于其他用户（uid {b.uid}），"
+                    "本工具无权终止，需以 root 权限处理")
+        return b
+    b.level = "NEVER"
+    b.reason = (f"该进程属于其他用户（uid {b.uid}），本工具无权终止；"
+                "如需释放需以 root 权限处理")
+    return b
+
+
+def assess(blocker: Blocker, self_pid: Optional[int] = None) -> Blocker:
+    """定级 + 权限标注。判定语义见 `_assess_level`。"""
+    return _apply_uid_policy(_assess_level(blocker, self_pid))
 
 
 def enrich_and_assess(blockers: Iterable[Blocker]) -> list[Blocker]:
@@ -1096,7 +1229,11 @@ def render_report(vol: Volume, blockers: list[Blocker], warnings: list[str],
     lines.append("")
 
     if not blockers:
-        if access_level == "limited":
+        if not vol.scan_complete:
+            # 空列表也可能只是没扫完，不能读成「没有占用」
+            lines.append(pal.yellow("  扫描不完整，无法给出「没有占用」的结论。"))
+            lines.append(pal.dim("  请先排除扫描告警（见下方），再判断能否拔出。"))
+        elif access_level == "limited":
             lines.append(pal.yellow("  未发现本用户可访问的占用进程。"))
             lines.append(pal.dim("  但当前权限看不到系统进程，仍可能有 root 进程持有句柄。"))
         else:
@@ -1126,6 +1263,11 @@ def render_report(vol: Volume, blockers: list[Blocker], warnings: list[str],
             lines.append("  " + lv + cmd + pad(str(b.pid), 8, right=True)
                          + "  " + pad(kind, 12) + pad(str(len(real)), 6) + state)
         lines.append("")
+        if not vol.scan_complete:
+            # 有列表也不代表列全了：截断/超时后的前缀可能恰好漏掉写盘进程
+            lines.append(pal.yellow(
+                "  注意：本次扫描不完整，上面这份列表可能漏掉占用进程，不能据此判定可以拔出。"))
+            lines.append("")
 
         for b in blockers:
             lines.append(f"  {pal.level(b.level, '· ' + LEVEL_LABEL[b.level])}  {pal.bold(b.command)} ({b.pid}) — {b.reason}")
@@ -1154,7 +1296,11 @@ def render_report(vol: Volume, blockers: list[Blocker], warnings: list[str],
     lines.append(pal.bold("建议"))
     warn_clues = [c for c in clues if c.warn]
     if not blockers:
-        if access_level == "limited":
+        if not vol.scan_complete:
+            # 扫描没跑完就给出「可以直接推出」是假绿，与产品最核心的诚实性冲突
+            lines.append(pal.yellow("  扫描不完整，暂不给出能否推出的结论。"))
+            lines.append(pal.dim("  请按上方提示排除扫描问题后重试。"))
+        elif access_level == "limited":
             lines.append(pal.yellow("  先补齐权限再判断：sudo volfree analyze "
                                     + f'"{vol.display}"'))
             lines.append(pal.dim("  或在「系统设置 → 隐私与安全性 → 完全磁盘访问」中给终端授权。"))
@@ -1221,6 +1367,8 @@ def blocker_payload(b: Blocker) -> dict:
             "has_uncertain_write": b.has_uncertain_write,
             "all_deleted": b.all_deleted,
             "only_read": b.only_read,
+            # 属于其他用户：界面据此提示「需 root 权限」，而不是把按钮点出一个失败
+            "other_user": b.other_user,
         },
         "handles": [
             {"fd": h.fd, "access": h.access, "type": h.ftype,
@@ -1253,6 +1401,8 @@ def volume_payload(vol: Volume, blockers: list[Blocker], warnings: list[str],
             "writing": sum(1 for b in blockers if b.has_write),
             # 会被放弃的写入次数：界面据此决定主按钮要不要先软确认
             "abandoned_writes": sum(1 for b in blockers if b.all_writes_unlinked),
+            # 扫描是否完整。False 时界面必须降级——空列表不等于「没有占用」
+            "complete": vol.scan_complete,
         },
         "blockers": [blocker_payload(b) for b in blockers],
         "clues": [{"label": c.label, "detail": c.detail, "warn": c.warn} for c in (clues or [])],
@@ -1281,8 +1431,36 @@ def ask(prompt: str, assume_yes: bool = False) -> bool:
         return False
 
 
+def pid_holds_volume(pid: int, mountpoint: str) -> Optional[bool]:
+    """复核：该进程此刻是否仍持有指定挂载点上的句柄。
+
+    True  仍持有
+    False 已不再持有（扫描之后释放了，或根本没持有）
+    None  无法复核（lsof 不可用、超时、异常退出），调用方须按不安全处理
+    """
+    if not mountpoint:
+        return None
+    root = mountpoint.rstrip("/") or "/"
+    prefix = root if root.endswith("/") else root + "/"
+    cmd = ["lsof", "-nP", "+c", "0", "-F", "pn", "-p", str(pid), root]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=10, errors="replace")
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    # 退出码 1 表示无匹配，即该进程已不持有本卷句柄
+    if p.returncode not in (0, 1):
+        return None
+    for line in p.stdout.splitlines():
+        if line.startswith("n"):
+            name = line[1:]
+            if name == root or name.startswith(prefix):
+                return True
+    return False
+
+
 def verify_identity(b: Blocker) -> tuple[bool, str]:
-    """终止前复核：PID 仍存活、启动时间与可执行路径均未变。"""
+    """终止前复核：PID 仍存活、启动时间与可执行路径均未变，且仍持有同一个卷。"""
     if b.start_time:
         now_start = proc_start_time(b.pid)
         if now_start != b.start_time:
@@ -1292,6 +1470,15 @@ def verify_identity(b: Blocker) -> tuple[bool, str]:
         return False, "可执行路径已变化（疑似 PID 复用），跳过"
     if now_exe == "" and b.exe:
         return False, "进程已不存在，跳过"
+    # 卷绑定复核：前三项都通过，也只说明「还是同一个进程」，
+    # 不说明「它此刻还占着这个卷」。扫描之后它可能已关掉句柄，
+    # 此时终止它既无必要，也放大了 PID 复用窗口里的误杀风险。
+    if b.mountpoint:
+        held = pid_holds_volume(b.pid, b.mountpoint)
+        if held is False:
+            return False, "该进程已不再持有本卷句柄（可能已切换到其他卷），跳过"
+        if held is None:
+            return False, "无法复核该进程与本卷的绑定关系，为安全起见跳过"
     return True, ""
 
 
@@ -1549,14 +1736,21 @@ def cmd_watch(args, pal: Palette) -> int:
         blockers, _warnings = scan_blockers(vol)
         blockers = enrich_and_assess(blockers)
         risky = sum(1 for b in blockers if b.level == "RISKY")
-        # 与界面 Models.swift 的 `tone` 保持同一条规则：有 RISKY 就是红，否则有人占着就是黄
-        tone = "danger" if risky else ("caution" if blockers else "safe")
+        # 与界面 Models.swift 的 `tone` 保持同一条规则：
+        # 有 RISKY 就是红，否则有人占着就是黄；扫描不完整一律黄，不给绿。
+        if risky:
+            tone = "danger"
+        elif blockers or not vol.scan_complete:
+            tone = "caution"
+        else:
+            tone = "safe"
         reports.append({
             "mountpoint": mountpoint,
             "tone": tone,
             "total": len(blockers),
             "risky": risky,
             "writing": sum(1 for b in blockers if b.has_write),
+            "complete": vol.scan_complete,
         })
 
     print(json.dumps({"version": VERSION, "volumes": reports}, ensure_ascii=False))

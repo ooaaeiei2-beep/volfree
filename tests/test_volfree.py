@@ -121,19 +121,14 @@ class TestLinkCountProbe(unittest.TestCase):
     必须识别出该卷不可靠，否则 lsof 的 +L1 会给出假绿。"""
 
     def _scan(self, raw, missing):
-        class FakeProc:
-            returncode = 0
-            stderr = b""
-
-        FakeProc.stdout = raw
         vol = vf.Volume(device="/dev/disk9s1", mountpoint="/Volumes/X", fstype="exfat")
-        orig_run, orig_exists = vf.subprocess.run, vf.path_exists
-        vf.subprocess.run = lambda cmd, **kw: FakeProc()
+        orig_cap, orig_exists = vf.capture_bounded, vf.path_exists
+        vf.capture_bounded = lambda cmd, limit, timeout: (0, raw, "", False, False)
         vf.path_exists = lambda p: False if p in missing else True
         try:
             blockers, warnings = vf.scan_blockers(vol)
         finally:
-            vf.subprocess.run, vf.path_exists = orig_run, orig_exists
+            vf.capture_bounded, vf.path_exists = orig_cap, orig_exists
         return vol, blockers, warnings
 
     def test_exfat_missing_but_link_count_one_is_unreliable(self):
@@ -399,20 +394,15 @@ class TestMappingProbe(unittest.TestCase):
     """scan_blockers 必须为映射句柄补探保护位，探测失败保持未知。"""
 
     def _scan(self, raw, table):
-        class FakeProc:
-            returncode = 0
-            stderr = b""
-
-        FakeProc.stdout = raw
         vol = vf.Volume(device="/dev/disk9s1", mountpoint="/Volumes/X", fstype="exfat")
-        orig = (vf.subprocess.run, vf.path_exists, vf.scan_writable_mappings)
-        vf.subprocess.run = lambda cmd, **kw: FakeProc()
+        orig = (vf.capture_bounded, vf.path_exists, vf.scan_writable_mappings)
+        vf.capture_bounded = lambda cmd, limit, timeout: (0, raw, "", False, False)
         vf.path_exists = lambda p: True
         vf.scan_writable_mappings = lambda pid: table
         try:
             blockers, _ = vf.scan_blockers(vol)
         finally:
-            (vf.subprocess.run, vf.path_exists,
+            (vf.capture_bounded, vf.path_exists,
              vf.scan_writable_mappings) = orig
         return blockers
 
@@ -715,22 +705,17 @@ class TestLsofInvocation(unittest.TestCase):
     def test_uses_full_command_names(self):
         captured = {}
 
-        class FakeProc:
-            returncode = 1
-            stdout = b""
-            stderr = b""
-
-        def fake_run(cmd, **kwargs):
+        def fake_capture(cmd, limit, timeout):
             captured["cmd"] = cmd
-            return FakeProc()
+            return 1, b"", "", False, False
 
-        original = vf.subprocess.run
-        vf.subprocess.run = fake_run
+        original = vf.capture_bounded
+        vf.capture_bounded = fake_capture
         try:
             vf.scan_blockers(vf.Volume(device="/dev/disk9s1",
                                        mountpoint="/Volumes/X", fstype="exfat"))
         finally:
-            vf.subprocess.run = original
+            vf.capture_bounded = original
 
         cmd = captured["cmd"]
         self.assertIn("+c", cmd, "缺少 +c 会导致命令名被截断")
@@ -741,22 +726,17 @@ class TestLsofInvocation(unittest.TestCase):
         """必须请求字段 k，否则拿不到内核的 link count。"""
         captured = {}
 
-        class FakeProc:
-            returncode = 1
-            stdout = b""
-            stderr = b""
-
-        def fake_run(cmd, **kwargs):
+        def fake_capture(cmd, limit, timeout):
             captured["cmd"] = cmd
-            return FakeProc()
+            return 1, b"", "", False, False
 
-        original = vf.subprocess.run
-        vf.subprocess.run = fake_run
+        original = vf.capture_bounded
+        vf.capture_bounded = fake_capture
         try:
             vf.scan_blockers(vf.Volume(device="/dev/disk9s1",
                                        mountpoint="/Volumes/X", fstype="exfat"))
         finally:
-            vf.subprocess.run = original
+            vf.capture_bounded = original
 
         idx = captured["cmd"].index("-F")
         self.assertIn("k", captured["cmd"][idx + 1])
@@ -854,6 +834,185 @@ class TestWatchCommand(unittest.TestCase):
         v = payload["volumes"][0]
         self.assertEqual(v["total"], 2)
         self.assertEqual(v["risky"], 1)
+
+
+class TestVolumeBinding(unittest.TestCase):
+    """P0-1：发信号前必须复核「该 pid 此刻仍持有这个卷」。
+
+    只校验 pid + 启动时间 + exe，挡不住「扫描后关掉本卷句柄、PID 又被复用」。
+    """
+
+    START = 1_700_000_000
+    EXE = "/Applications/A.app/Contents/MacOS/A"
+
+    def _blocker(self, mountpoint="/Volumes/X"):
+        return vf.Blocker(pid=4242, command="A", exe=self.EXE,
+                          start_time=self.START, device="/dev/disk9s1",
+                          mountpoint=mountpoint)
+
+    def _verify(self, held, mountpoint="/Volumes/X"):
+        b = self._blocker(mountpoint)
+        orig = (vf.proc_start_time, vf.proc_executable_path, vf.pid_holds_volume)
+        vf.proc_start_time = lambda pid: self.START
+        vf.proc_executable_path = lambda pid: self.EXE
+        vf.pid_holds_volume = lambda pid, mp: held
+        try:
+            return vf.verify_identity(b)
+        finally:
+            (vf.proc_start_time, vf.proc_executable_path,
+             vf.pid_holds_volume) = orig
+
+    def test_pid_reused_on_other_volume_is_rejected(self):
+        """pid 与启动时间都没变，但句柄已不在本卷 —— 必须拒绝。"""
+        ok, why = self._verify(False)
+        self.assertFalse(ok)
+        self.assertIn("不再持有本卷", why)
+
+    def test_still_holding_same_volume_passes(self):
+        ok, _ = self._verify(True)
+        self.assertTrue(ok)
+
+    def test_unknown_binding_is_rejected(self):
+        """复核不了就不动手：宁可跳过，也不赌。"""
+        ok, why = self._verify(None)
+        self.assertFalse(ok)
+        self.assertIn("无法复核", why)
+
+    def test_blocker_without_mountpoint_keeps_old_behaviour(self):
+        """没有卷信息（老调用方/单测构造）时退回原有三项校验。"""
+        ok, _ = self._verify(False, mountpoint="")
+        self.assertTrue(ok)
+
+    def test_scan_stamps_volume_identity(self):
+        raw = b"p1\ncA\nf3\nar\nk1\nn/Volumes/X/a.txt\0"
+        vol = vf.Volume(device="/dev/disk9s1", mountpoint="/Volumes/X", fstype="exfat")
+        orig = (vf.capture_bounded, vf.path_exists)
+        vf.capture_bounded = lambda cmd, limit, timeout: (0, raw, "", False, False)
+        vf.path_exists = lambda p: True
+        try:
+            blockers, _ = vf.scan_blockers(vol)
+        finally:
+            vf.capture_bounded, vf.path_exists = orig
+        self.assertEqual(blockers[0].device, "/dev/disk9s1")
+        self.assertEqual(blockers[0].mountpoint, "/Volumes/X")
+
+    def test_pid_holds_volume_matches_subtree_only(self):
+        """句柄路径必须落在该挂载点之内，同名前缀不算。"""
+        class FakeProc:
+            returncode = 0
+            stdout = "p4242\nn/Volumes/X2/other.txt\nn/Volumes/X/a.txt\n"
+
+        orig = vf.subprocess.run
+        vf.subprocess.run = lambda cmd, **kw: FakeProc()
+        try:
+            self.assertTrue(vf.pid_holds_volume(4242, "/Volumes/X"))
+            self.assertFalse(vf.pid_holds_volume(4242, "/Volumes/Y"))
+        finally:
+            vf.subprocess.run = orig
+
+
+class TestBoundedCapture(unittest.TestCase):
+    """P1-1：lsof 输出必须有上限；超限要截断并降级结论。"""
+
+    def test_small_output_is_complete(self):
+        code, raw, err, truncated, timed_out = vf.capture_bounded(
+            ["/bin/sh", "-c", "printf abc"], 1024, 10)
+        self.assertEqual(raw, b"abc")
+        self.assertFalse(truncated)
+        self.assertFalse(timed_out)
+
+    def test_oversize_output_is_truncated(self):
+        _, raw, _, truncated, timed_out = vf.capture_bounded(
+            ["/bin/sh", "-c", "yes volfree | head -c 200000"], 4096, 10)
+        self.assertTrue(truncated)
+        self.assertFalse(timed_out)
+        self.assertLessEqual(len(raw), 4096)
+
+    def _scan_with(self, result):
+        vol = vf.Volume(device="/dev/disk9s1", mountpoint="/Volumes/X", fstype="exfat")
+        orig = vf.capture_bounded
+        vf.capture_bounded = lambda cmd, limit, timeout: result
+        try:
+            blockers, warnings = vf.scan_blockers(vol)
+        finally:
+            vf.capture_bounded = orig
+        return vol, blockers, warnings
+
+    def test_truncated_scan_degrades_conclusion(self):
+        vol, blockers, warnings = self._scan_with((0, b"", "", True, False))
+        self.assertIs(vol.scan_complete, False)
+        self.assertTrue(any("截断" in w for w in warnings))
+        payload = json.loads(vf.blockers_to_json(vol, blockers, warnings))
+        self.assertIs(payload["summary"]["complete"], False)
+
+    def test_timeout_marks_incomplete(self):
+        vol, _, warnings = self._scan_with((124, b"", "", False, True))
+        self.assertIs(vol.scan_complete, False)
+        self.assertTrue(any("超时" in w for w in warnings))
+
+    def test_abnormal_exit_marks_incomplete(self):
+        vol, _, _ = self._scan_with((2, b"", "boom", False, False))
+        self.assertIs(vol.scan_complete, False)
+
+    def test_complete_scan_stays_complete(self):
+        vol, _, _ = self._scan_with((1, b"", "", False, False))
+        self.assertIs(vol.scan_complete, True)
+
+    def test_report_never_claims_safe_when_incomplete(self):
+        """扫描不完整时，空列表不能渲染成「可直接推出」。"""
+        vol = vf.Volume(device="/dev/disk9s1", mountpoint="/Volumes/X",
+                        fstype="exfat", external=True, scan_complete=False)
+        text = vf.render_report(vol, [], ["lsof 输出超限，已截断"],
+                                vf.Palette(False), ("full", "完全磁盘访问"))
+        self.assertIn("扫描不完整", text)
+        self.assertNotIn("可直接在访达推出", text)
+        self.assertNotIn("未发现占用", text)
+
+
+class TestOtherUserPolicy(unittest.TestCase):
+    """P1-3：其他用户的进程在 assess 阶段就标注，不必等到 EPERM 才发现。"""
+
+    OTHER = os.getuid() + 1
+
+    def _assess(self, uid, handles):
+        b = vf.Blocker(pid=9000, command="X", uid=uid,
+                       exe="/Applications/A.app/Contents/MacOS/A", handles=handles)
+        vf.assess(b, self_pid=1)
+        return b
+
+    @staticmethod
+    def _ro():
+        return vf.Handle(fd="3", access="r", ftype="REG",
+                         name="/Volumes/D/doc.psd", exists=True, link_count=1)
+
+    @staticmethod
+    def _rw():
+        return vf.Handle(fd="3", access="u", ftype="REG",
+                         name="/Volumes/D/doc.psd", exists=True, link_count=1)
+
+    def test_other_user_readonly_becomes_never(self):
+        b = self._assess(self.OTHER, [self._ro()])
+        self.assertEqual(b.level, "NEVER")
+        self.assertTrue(b.other_user)
+        self.assertIn("无权终止", b.reason)
+
+    def test_other_user_write_keeps_risky(self):
+        """写入风险不能被「反正杀不掉」冲淡成低等级。"""
+        b = self._assess(self.OTHER, [self._rw()])
+        self.assertEqual(b.level, "RISKY")
+        self.assertTrue(b.other_user)
+        self.assertIn("无权终止", b.reason)
+
+    def test_same_user_is_untouched(self):
+        b = self._assess(os.getuid(), [self._ro()])
+        self.assertEqual(b.level, "CAUTION")
+        self.assertFalse(b.other_user)
+
+    def test_unknown_uid_is_not_guessed(self):
+        """uid 取不到时不得擅自判成「别人的进程」。"""
+        b = self._assess(-1, [self._ro()])
+        self.assertEqual(b.level, "CAUTION")
+        self.assertFalse(b.other_user)
 
 
 class _Args:

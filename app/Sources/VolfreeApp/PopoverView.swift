@@ -166,6 +166,8 @@ struct PopoverView: View {
     }
 
     private func verdictText(_ report: VolumeReport) -> String {
+        // 没扫完就不下结论，比任何颜色的结论都诚实
+        if report.scanIncomplete { return "无法判断" }
         switch report.tone {
         case .safe:
             // 看不到全部进程时，只能说「没发现」，不能说「可以拔了」
@@ -176,6 +178,9 @@ struct PopoverView: View {
     }
 
     private func verdictReason(_ report: VolumeReport) -> String {
+        if report.scanIncomplete {
+            return "扫描未完成（lsof 超时或输出被截断），结果不能作为能否拔出的依据"
+        }
         let n = report.summary.total
         switch report.tone {
         case .safe:
@@ -201,7 +206,8 @@ struct PopoverView: View {
     @ViewBuilder
     private func primaryButton(_ report: VolumeReport) -> some View {
         let tone = report.tone
-        let disabled = tone == .danger || model.busy
+        // 扫描不完整时不允许一键推出：可能还有没扫到的写入进程
+        let disabled = tone == .danger || model.busy || report.scanIncomplete
         Button {
             model.primaryAction()
         } label: {
@@ -221,6 +227,7 @@ struct PopoverView: View {
 
     private func primaryLabel(_ report: VolumeReport) -> String {
         if model.busy { return "正在处理…" }
+        if report.scanIncomplete { return "扫描不完整" }
         switch report.tone {
         case .safe: return "推出"
         case .caution:

@@ -155,9 +155,13 @@ struct VolumeSummary: Codable, Equatable {
     let safe: Int
     let writing: Int
     let abandonedWrites: Int
+    /// 扫描是否完整。lsof 超时或输出被截断时为 false，
+    /// 此时「0 个占用」只说明没扫完，不说明可以拔。
+    /// 用可选类型兼容旧版 CLI（老 JSON 里没有这个键）。
+    let complete: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case total, risky, caution, safe, writing
+        case total, risky, caution, safe, writing, complete
         case neverCount = "never"
         case abandonedWrites = "abandoned_writes"
     }
@@ -184,8 +188,14 @@ struct VolumeReport: Codable, Equatable, Identifiable {
     /// 三态：红 = 有人在写，黄 = 有占用但没人写，绿 = 没人占用。
     var tone: Tone {
         if summary.risky > 0 { return .danger }
+        // 扫描不完整时一律降级：空列表也可能只是没扫完，不能给绿。
+        if summary.complete == false { return .caution }
         return summary.total > 0 ? .caution : .safe
     }
+
+    /// 扫描没跑完（lsof 超时 / 输出被截断 / 退出码异常）。
+    /// 这种时候任何「没有占用」的结论都不成立。
+    var scanIncomplete: Bool { summary.complete == false }
 
     /// 可以安全结束的进程（主按钮一次处理掉的那批）。
     var actionable: [BlockerInfo] {

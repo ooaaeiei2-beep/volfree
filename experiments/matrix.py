@@ -118,6 +118,7 @@ print("C. assess() 的判定路径顺序（先命中先返回）")
 print("=" * 120)
 for line in [
     "A1  pid∈{0,1,自身} 或 exe∈PROTECTED_EXECUTABLES        → NEVER",
+    "A1b uid≠当前用户 且无写入（后置改写，不覆盖 RISKY）      → NEVER",
     "A2  has_write 且 全部可写句柄都无名                      → CAUTION",
     "A2b has_write 且 存在可写性未知的句柄                    → RISKY（按最坏情况）",
     "A3  has_write                                           → RISKY",
