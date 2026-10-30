@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import unittest
 
@@ -122,13 +123,13 @@ class TestLinkCountProbe(unittest.TestCase):
 
     def _scan(self, raw, missing):
         vol = vf.Volume(device="/dev/disk9s1", mountpoint="/Volumes/X", fstype="exfat")
-        orig_cap, orig_exists = vf.capture_bounded, vf.path_exists
-        vf.capture_bounded = lambda cmd, limit, timeout: (0, raw, "", False, False)
-        vf.path_exists = lambda p: False if p in missing else True
+        orig_cap, orig_exists = vf.scan.capture_bounded, vf.scan.path_exists
+        vf.scan.capture_bounded = lambda cmd, limit, timeout: (0, raw, "", False, False)
+        vf.scan.path_exists = lambda p: False if p in missing else True
         try:
             blockers, warnings = vf.scan_blockers(vol)
         finally:
-            vf.capture_bounded, vf.path_exists = orig_cap, orig_exists
+            vf.scan.capture_bounded, vf.scan.path_exists = orig_cap, orig_exists
         return vol, blockers, warnings
 
     def test_exfat_missing_but_link_count_one_is_unreliable(self):
@@ -395,15 +396,15 @@ class TestMappingProbe(unittest.TestCase):
 
     def _scan(self, raw, table):
         vol = vf.Volume(device="/dev/disk9s1", mountpoint="/Volumes/X", fstype="exfat")
-        orig = (vf.capture_bounded, vf.path_exists, vf.scan_writable_mappings)
-        vf.capture_bounded = lambda cmd, limit, timeout: (0, raw, "", False, False)
-        vf.path_exists = lambda p: True
-        vf.scan_writable_mappings = lambda pid: table
+        orig = (vf.scan.capture_bounded, vf.scan.path_exists, vf.scan.scan_writable_mappings)
+        vf.scan.capture_bounded = lambda cmd, limit, timeout: (0, raw, "", False, False)
+        vf.scan.path_exists = lambda p: True
+        vf.scan.scan_writable_mappings = lambda pid: table
         try:
             blockers, _ = vf.scan_blockers(vol)
         finally:
-            (vf.capture_bounded, vf.path_exists,
-             vf.scan_writable_mappings) = orig
+            (vf.scan.capture_bounded, vf.scan.path_exists,
+             vf.scan.scan_writable_mappings) = orig
         return blockers
 
     def test_probe_fills_mapped_writable(self):
@@ -598,14 +599,14 @@ class TestVolumeFlags(unittest.TestCase):
 
     def setUp(self):
         vf._parent_info_cache.clear()
-        self._original = vf.read_volume_info
+        self._original = vf.scan.read_volume_info
 
     def tearDown(self):
-        vf.read_volume_info = self._original
+        vf.scan.read_volume_info = self._original
         vf._parent_info_cache.clear()
 
     def test_external_from_parent(self):
-        vf.read_volume_info = lambda dev: ({"DeviceLocation": "External"}
+        vf.scan.read_volume_info = lambda dev: ({"DeviceLocation": "External"}
                                            if dev == "/dev/disk9" else {})
         external, ejectable, virtual = vf._volume_flags(
             {"ParentWholeDisk": "disk9", "Ejectable": True})
@@ -614,7 +615,7 @@ class TestVolumeFlags(unittest.TestCase):
         self.assertFalse(virtual)
 
     def test_disk_image_from_parent(self):
-        vf.read_volume_info = lambda dev: ({"MediaName": "Disk Image",
+        vf.scan.read_volume_info = lambda dev: ({"MediaName": "Disk Image",
                                             "VirtualOrPhysical": "Virtual"}
                                            if dev == "/dev/disk4" else {})
         _, _, virtual = vf._volume_flags({"ParentWholeDisk": "disk4"})
@@ -622,7 +623,7 @@ class TestVolumeFlags(unittest.TestCase):
 
     def test_usb_volume_without_devicelocation(self):
         """真实外接盘：卷级 Internal=false，父盘 USB + Physical，无 DeviceLocation。"""
-        vf.read_volume_info = lambda dev: ({"Internal": False, "BusProtocol": "USB",
+        vf.scan.read_volume_info = lambda dev: ({"Internal": False, "BusProtocol": "USB",
                                             "VirtualOrPhysical": "Physical",
                                             "MediaName": "SanDisk 3.2 Gen1",
                                             "Ejectable": True}
@@ -634,12 +635,12 @@ class TestVolumeFlags(unittest.TestCase):
         self.assertFalse(virtual)
 
     def test_internal_disk_is_not_external(self):
-        vf.read_volume_info = lambda dev: {"Internal": True}
+        vf.scan.read_volume_info = lambda dev: {"Internal": True}
         external, _, _ = vf._volume_flags({"ParentWholeDisk": "disk0", "Internal": True})
         self.assertFalse(external)
 
     def test_virtual_is_not_external(self):
-        vf.read_volume_info = lambda dev: {"Internal": False,
+        vf.scan.read_volume_info = lambda dev: {"Internal": False,
                                            "VirtualOrPhysical": "Virtual",
                                            "MediaName": "Disk Image"}
         external, _, virtual = vf._volume_flags({"ParentWholeDisk": "disk4"})
@@ -653,7 +654,7 @@ class TestVolumeFlags(unittest.TestCase):
             calls.append(dev)
             return {"Internal": False}
 
-        vf.read_volume_info = counting
+        vf.scan.read_volume_info = counting
         vf._volume_flags({"ParentWholeDisk": "disk7"})
         vf._volume_flags({"ParentWholeDisk": "disk7"})
         self.assertEqual(calls, ["/dev/disk7"], "同一父盘只应查询一次")
@@ -709,13 +710,13 @@ class TestLsofInvocation(unittest.TestCase):
             captured["cmd"] = cmd
             return 1, b"", "", False, False
 
-        original = vf.capture_bounded
-        vf.capture_bounded = fake_capture
+        original = vf.scan.capture_bounded
+        vf.scan.capture_bounded = fake_capture
         try:
             vf.scan_blockers(vf.Volume(device="/dev/disk9s1",
                                        mountpoint="/Volumes/X", fstype="exfat"))
         finally:
-            vf.capture_bounded = original
+            vf.scan.capture_bounded = original
 
         cmd = captured["cmd"]
         self.assertIn("+c", cmd, "缺少 +c 会导致命令名被截断")
@@ -730,13 +731,13 @@ class TestLsofInvocation(unittest.TestCase):
             captured["cmd"] = cmd
             return 1, b"", "", False, False
 
-        original = vf.capture_bounded
-        vf.capture_bounded = fake_capture
+        original = vf.scan.capture_bounded
+        vf.scan.capture_bounded = fake_capture
         try:
             vf.scan_blockers(vf.Volume(device="/dev/disk9s1",
                                        mountpoint="/Volumes/X", fstype="exfat"))
         finally:
-            vf.capture_bounded = original
+            vf.scan.capture_bounded = original
 
         idx = captured["cmd"].index("-F")
         self.assertIn("k", captured["cmd"][idx + 1])
@@ -778,17 +779,17 @@ class TestWatchCommand(unittest.TestCase):
                 return 0, body, ""
             return 0, "", ""
 
-        orig = (vf.run, vf.scan_blockers, vf.enrich_and_assess)
-        vf.run = fake_run
-        vf.scan_blockers = lambda vol: (list(blockers_by_mp.get(vol.mountpoint, [])), [])
-        vf.enrich_and_assess = lambda bs: bs
+        orig = (vf.cli.run, vf.cli.scan_blockers, vf.cli.enrich_and_assess)
+        vf.cli.run = fake_run
+        vf.cli.scan_blockers = lambda vol: (list(blockers_by_mp.get(vol.mountpoint, [])), [])
+        vf.cli.enrich_and_assess = lambda bs: bs
         try:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 code = vf.cmd_watch(_Args(volume=wanted), None)
             return code, json.loads(buf.getvalue()), calls
         finally:
-            vf.run, vf.scan_blockers, vf.enrich_and_assess = orig
+            vf.cli.run, vf.cli.scan_blockers, vf.cli.enrich_and_assess = orig
 
     def test_no_mountpoints_spawns_nothing(self):
         """没给挂载点就直接返回，连 mount 都不跑——没盘时应当零开销。"""
@@ -852,15 +853,16 @@ class TestVolumeBinding(unittest.TestCase):
 
     def _verify(self, held, mountpoint="/Volumes/X"):
         b = self._blocker(mountpoint)
-        orig = (vf.proc_start_time, vf.proc_executable_path, vf.pid_holds_volume)
-        vf.proc_start_time = lambda pid: self.START
-        vf.proc_executable_path = lambda pid: self.EXE
-        vf.pid_holds_volume = lambda pid, mp: held
+        orig = (vf.cli.proc_start_time, vf.cli.proc_executable_path,
+                vf.cli.pid_holds_volume)
+        vf.cli.proc_start_time = lambda pid: self.START
+        vf.cli.proc_executable_path = lambda pid: self.EXE
+        vf.cli.pid_holds_volume = lambda pid, mp: held
         try:
             return vf.verify_identity(b)
         finally:
-            (vf.proc_start_time, vf.proc_executable_path,
-             vf.pid_holds_volume) = orig
+            (vf.cli.proc_start_time, vf.cli.proc_executable_path,
+             vf.cli.pid_holds_volume) = orig
 
     def test_pid_reused_on_other_volume_is_rejected(self):
         """pid 与启动时间都没变，但句柄已不在本卷 —— 必须拒绝。"""
@@ -886,13 +888,13 @@ class TestVolumeBinding(unittest.TestCase):
     def test_scan_stamps_volume_identity(self):
         raw = b"p1\ncA\nf3\nar\nk1\nn/Volumes/X/a.txt\0"
         vol = vf.Volume(device="/dev/disk9s1", mountpoint="/Volumes/X", fstype="exfat")
-        orig = (vf.capture_bounded, vf.path_exists)
-        vf.capture_bounded = lambda cmd, limit, timeout: (0, raw, "", False, False)
-        vf.path_exists = lambda p: True
+        orig = (vf.scan.capture_bounded, vf.scan.path_exists)
+        vf.scan.capture_bounded = lambda cmd, limit, timeout: (0, raw, "", False, False)
+        vf.scan.path_exists = lambda p: True
         try:
             blockers, _ = vf.scan_blockers(vol)
         finally:
-            vf.capture_bounded, vf.path_exists = orig
+            vf.scan.capture_bounded, vf.scan.path_exists = orig
         self.assertEqual(blockers[0].device, "/dev/disk9s1")
         self.assertEqual(blockers[0].mountpoint, "/Volumes/X")
 
@@ -902,13 +904,13 @@ class TestVolumeBinding(unittest.TestCase):
             returncode = 0
             stdout = "p4242\nn/Volumes/X2/other.txt\nn/Volumes/X/a.txt\n"
 
-        orig = vf.subprocess.run
-        vf.subprocess.run = lambda cmd, **kw: FakeProc()
+        orig = subprocess.run
+        subprocess.run = lambda cmd, **kw: FakeProc()
         try:
             self.assertTrue(vf.pid_holds_volume(4242, "/Volumes/X"))
             self.assertFalse(vf.pid_holds_volume(4242, "/Volumes/Y"))
         finally:
-            vf.subprocess.run = orig
+            subprocess.run = orig
 
 
 class TestBoundedCapture(unittest.TestCase):
@@ -930,12 +932,12 @@ class TestBoundedCapture(unittest.TestCase):
 
     def _scan_with(self, result):
         vol = vf.Volume(device="/dev/disk9s1", mountpoint="/Volumes/X", fstype="exfat")
-        orig = vf.capture_bounded
-        vf.capture_bounded = lambda cmd, limit, timeout: result
+        orig = vf.scan.capture_bounded
+        vf.scan.capture_bounded = lambda cmd, limit, timeout: result
         try:
             blockers, warnings = vf.scan_blockers(vol)
         finally:
-            vf.capture_bounded = orig
+            vf.scan.capture_bounded = orig
         return vol, blockers, warnings
 
     def test_truncated_scan_degrades_conclusion(self):
@@ -1041,6 +1043,22 @@ class TestAssessRules(unittest.TestCase):
         names = [r.name for r in vf.ASSESS_RULES]
         self.assertEqual(names[0], "A1")
         self.assertLess(names.index("A4"), names.index("A6"))
+
+
+class TestBundleIsCurrent(unittest.TestCase):
+    """分发物是仓库根的 volfree.py，由 tools/bundle.py 从 volfree/ 包生成。
+
+    源码拆包后，忘了重新生成就会让用户下载到旧代码——app 读的也是那个单文件，
+    所以这条守卫必须存在。改完包里任何模块，先跑 `python3 tools/bundle.py`。
+    """
+
+    def test_committed_bundle_matches_package(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        proc = subprocess.run(
+            [sys.executable, os.path.join(root, "tools", "bundle.py"), "--check"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, (proc.stdout + proc.stderr).strip())
 
 
 class _Args:

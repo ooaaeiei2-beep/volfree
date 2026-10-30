@@ -25,7 +25,10 @@
   - 默认只读；任何结束进程、卸载动作都要求 --apply 且逐项确认
   - 永不自动 SIGKILL，需显式 --force
   - 永不自动 force unmount，需显式 --force-unmount，且存在写入句柄时一律拒绝
-  - 终止前校验 PID + 启动时间 + 可执行路径，防止 PID 复用误杀
+  - 终止前校验 PID + 启动时间 + 可执行路径，并复核该进程仍持有本卷，防止 PID 复用误杀
+
+本文件由 tools/bundle.py 从 volfree/ 包生成，不要直接编辑——
+改动会在下次重新生成时被覆盖。要改就改包里的模块。
 """
 
 from __future__ import annotations
@@ -49,6 +52,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
+
+# ────────────────────────── 数据结构 ──────────────────────────
+
+
+# 源文件：volfree/models.py
+
+
 VERSION = "0.3.0"
 
 # ────────────────────────────── 风险等级 ──────────────────────────────
@@ -57,22 +67,8 @@ VERSION = "0.3.0"
 # RISKY   正在写入，强杀可能损坏文件
 # NEVER   禁止操作（PID 1、窗口服务、自身等）
 LEVEL_ORDER = {"NEVER": 0, "RISKY": 1, "CAUTION": 2, "SAFE": 3}
+
 LEVEL_LABEL = {"SAFE": "安全", "CAUTION": "谨慎", "RISKY": "危险", "NEVER": "禁止"}
-
-# 绝不允许结束的进程（按可执行路径尾部匹配）
-PROTECTED_EXECUTABLES = {
-    "/sbin/launchd",
-    "/usr/libexec/launchd",
-    "/System/Library/CoreServices/WindowServer",
-    "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mds",
-}
-
-# 系统级辅助进程：终止后由 launchd 自动重启，通常无害，但可能影响系统功能
-SYSTEM_HELPER_HINTS = ("/System/Library/", "/usr/libexec/", "/usr/sbin/")
-
-# 会被系统按需重启的 UI 辅助类扩展（缩略图 / QuickLook / Finder 扩展）
-RESTARTABLE_APPEX_HINTS = (".appex/", "QuickLook", "Thumbnail", "Thumb")
-
 
 # ────────────────────────────── 数据结构 ──────────────────────────────
 @dataclass
@@ -100,7 +96,6 @@ class Volume:
     @property
     def display(self) -> str:
         return self.volume_name or os.path.basename(self.mountpoint) or self.device
-
 
 @dataclass
 class Handle:
@@ -179,7 +174,6 @@ class Handle:
         """
         return not self.name.startswith("/")
 
-
 @dataclass
 class Blocker:
     """一个占用卷的进程。"""
@@ -246,37 +240,257 @@ class Blocker:
         return bool(real) and all(h.is_certainly_read_only for h in real)
 
 
-# ────────────────────────────── 输出辅助 ──────────────────────────────
-class Palette:
-    """ANSI 配色；非 tty 或 --no-color 时全部降级为空串。"""
+# ────────────────────────── libproc 封装 ──────────────────────────
 
-    def __init__(self, enabled: bool):
-        self.enabled = enabled
 
-    def _wrap(self, code: str, text: str) -> str:
-        return f"\033[{code}m{text}\033[0m" if self.enabled else text
+# 源文件：volfree/proc.py
 
-    def bold(self, t: str) -> str:
-        return self._wrap("1", t)
 
-    def dim(self, t: str) -> str:
-        return self._wrap("2", t)
+# ────────────────────────────── 进程信息（libproc） ──────────────────────────────
+class ProcBsdInfo(ctypes.Structure):
+    """libproc.h 的 struct proc_bsdinfo 子集，仅取需要的字段。"""
 
-    def green(self, t: str) -> str:
-        return self._wrap("32", t)
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
 
-    def yellow(self, t: str) -> str:
-        return self._wrap("33", t)
+PROC_PIDTBSDINFO = 3
 
-    def red(self, t: str) -> str:
-        return self._wrap("31", t)
+PROC_PIDPATHINFO_MAXSIZE = 4096
 
-    def cyan(self, t: str) -> str:
-        return self._wrap("36", t)
+# 文件映射区的保护位。lsof 对映射文件报的 fd=txt 条目 access 恒为空，
+# 拿不到「能不能写」；proc_pidinfo 能拿到，实测与 vmmap 的 rw-/rwx、r--/r-x 一致。
+PROC_PIDREGIONPATHINFO = 8
 
-    def level(self, lv: str, text: str) -> str:
-        return {"SAFE": self.green, "CAUTION": self.yellow,
-                "RISKY": self.red, "NEVER": self.red}[lv](text)
+VM_PROT_WRITE = 0x2
+
+MAXPATHLEN = 1024
+
+class VinfoStat(ctypes.Structure):
+    """struct vinfo_stat，只为对齐 struct vnode_info 的布局，字段不参与判定。"""
+
+    _fields_ = [
+        ("vst_dev", ctypes.c_uint32),
+        ("vst_mode", ctypes.c_uint16),
+        ("vst_nlink", ctypes.c_uint16),
+        ("vst_ino", ctypes.c_uint64),
+        ("vst_uid", ctypes.c_uint32),
+        ("vst_gid", ctypes.c_uint32),
+        ("vst_atime", ctypes.c_int64),
+        ("vst_atimensec", ctypes.c_int64),
+        ("vst_mtime", ctypes.c_int64),
+        ("vst_mtimensec", ctypes.c_int64),
+        ("vst_ctime", ctypes.c_int64),
+        ("vst_ctimensec", ctypes.c_int64),
+        ("vst_birthtime", ctypes.c_int64),
+        ("vst_birthtimensec", ctypes.c_int64),
+        ("vst_size", ctypes.c_int64),
+        ("vst_blocks", ctypes.c_int64),
+        ("vst_blksize", ctypes.c_int32),
+        ("vst_flags", ctypes.c_uint32),
+        ("vst_gen", ctypes.c_uint32),
+        ("vst_rdev", ctypes.c_uint32),
+        ("vst_qspare", ctypes.c_int64 * 2),
+    ]
+
+class VnodeInfoPath(ctypes.Structure):
+    """struct vnode_info + vip_path。"""
+
+    _fields_ = [
+        ("vip_stat", VinfoStat),
+        ("vip_type", ctypes.c_int),
+        ("vip_pad", ctypes.c_int),
+        ("vip_fsid", ctypes.c_int32 * 2),
+        ("vip_path", ctypes.c_char * MAXPATHLEN),
+    ]
+
+class ProcRegionInfo(ctypes.Structure):
+    """struct proc_regioninfo。"""
+
+    _fields_ = [
+        ("pri_protection", ctypes.c_uint32),
+        ("pri_max_protection", ctypes.c_uint32),
+        ("pri_inheritance", ctypes.c_uint32),
+        ("pri_flags", ctypes.c_uint32),
+        ("pri_offset", ctypes.c_uint64),
+        ("pri_behavior", ctypes.c_uint32),
+        ("pri_user_wired_count", ctypes.c_uint32),
+        ("pri_user_tag", ctypes.c_uint32),
+        ("pri_pages_resident", ctypes.c_uint32),
+        ("pri_pages_shared_now_private", ctypes.c_uint32),
+        ("pri_pages_swapped_out", ctypes.c_uint32),
+        ("pri_pages_dirtied", ctypes.c_uint32),
+        ("pri_ref_count", ctypes.c_uint32),
+        ("pri_shadow_depth", ctypes.c_uint32),
+        ("pri_share_mode", ctypes.c_uint32),
+        ("pri_private_pages_resident", ctypes.c_uint32),
+        ("pri_shared_pages_resident", ctypes.c_uint32),
+        ("pri_obj_id", ctypes.c_uint32),
+        ("pri_depth", ctypes.c_uint32),
+        ("pri_address", ctypes.c_uint64),
+        ("pri_size", ctypes.c_uint64),
+    ]
+
+class ProcRegionWithPathInfo(ctypes.Structure):
+    """struct proc_regionwithpathinfo，实测 1272 字节。"""
+
+    _fields_ = [
+        ("prp_prinfo", ProcRegionInfo),
+        ("prp_vip", VnodeInfoPath),
+    ]
+
+RUSAGE_INFO_V2 = 2
+
+class RusageInfoV2(ctypes.Structure):
+    """struct rusage_info_v2，实测 160 字节。
+
+    只为了拿 `ri_diskio_byteswritten`——进程累计写盘字节数。
+    界面用它做差商得到写入速率，比按文件大小猜可靠：
+    mmap 写入不改变文件长度，看 size 永远是零增长。
+    """
+
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+        ("ri_child_user_time", ctypes.c_uint64),
+        ("ri_child_system_time", ctypes.c_uint64),
+        ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_child_interrupt_wkups", ctypes.c_uint64),
+        ("ri_child_pageins", ctypes.c_uint64),
+        ("ri_child_elapsed_abstime", ctypes.c_uint64),
+        ("ri_diskio_bytesread", ctypes.c_uint64),
+        ("ri_diskio_byteswritten", ctypes.c_uint64),
+    ]
+
+def proc_diskio_written(pid: int) -> Optional[int]:
+    """进程累计写盘字节数。取不到返回 None（界面按「未知」处理，不显示速率）。"""
+    lib = _get_libproc()
+    if not lib:
+        return None
+    if not hasattr(lib, "proc_pid_rusage"):
+        return None
+    lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    lib.proc_pid_rusage.restype = ctypes.c_int
+    info = RusageInfoV2()
+    if lib.proc_pid_rusage(pid, RUSAGE_INFO_V2, ctypes.byref(info)) != 0:
+        return None
+    return int(info.ri_diskio_byteswritten)
+
+_libproc = None
+
+def _get_libproc():
+    global _libproc
+    if _libproc is None:
+        name = ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib"
+        try:
+            lib = ctypes.CDLL(name, use_errno=True)
+            lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+            lib.proc_pidpath.restype = ctypes.c_int
+            lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                         ctypes.c_void_p, ctypes.c_int]
+            lib.proc_pidinfo.restype = ctypes.c_int
+            _libproc = lib
+        except OSError:
+            _libproc = False
+    return _libproc or None
+
+def proc_executable_path(pid: int) -> str:
+    """取进程可执行文件绝对路径；失败返回空串。"""
+    lib = _get_libproc()
+    if not lib:
+        return ""
+    buf = ctypes.create_string_buffer(PROC_PIDPATHINFO_MAXSIZE)
+    n = lib.proc_pidpath(pid, buf, PROC_PIDPATHINFO_MAXSIZE)
+    return buf.value.decode("utf-8", "replace") if n > 0 else ""
+
+def proc_start_time(pid: int) -> int:
+    """取进程启动时间（epoch 秒）；失败返回 0。用于防止 PID 复用误杀。"""
+    lib = _get_libproc()
+    if not lib:
+        return 0
+    info = ProcBsdInfo()
+    n = lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info),
+                         ctypes.sizeof(info))
+    return int(info.pbi_start_tvsec) if n > 0 else 0
+
+def proc_uid(pid: int) -> int:
+    lib = _get_libproc()
+    if not lib:
+        return -1
+    info = ProcBsdInfo()
+    n = lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info),
+                         ctypes.sizeof(info))
+    return int(info.pbi_uid) if n > 0 else -1
+
+def scan_writable_mappings(pid: int) -> dict[str, bool]:
+    """列出该进程所有文件映射区，返回 {路径: 是否可写}。
+
+    lsof 对映射文件报的 fd=txt 条目，access 字段恒为空，读不出「能不能写」。
+    这里直接问内核：遍历该进程的映射区，取 pri_protection 的写位。
+    实测与 vmmap 的 rw-/rwx、r--/r-x 逐字一致。
+
+    取不到（进程已退出、权限不足）时返回空字典，调用方必须把它当成
+    「未知」，不得当成「只读」。
+    """
+    lib = _get_libproc()
+    if not lib:
+        return {}
+    buf = ProcRegionWithPathInfo()
+    size = ctypes.sizeof(buf)
+    addr = 0
+    out: dict[str, bool] = {}
+    while True:
+        n = lib.proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, addr,
+                             ctypes.byref(buf), size)
+        if n <= 0:
+            # 走到最后一个区域后必然返回一次 EINVAL，属正常终止
+            break
+        path = buf.prp_vip.vip_path.decode("utf-8", "replace")
+        if path:
+            writable = bool(buf.prp_prinfo.pri_protection & VM_PROT_WRITE)
+            for key in (path, os.path.realpath(path)):
+                out[key] = out.get(key, False) or writable
+        nxt = buf.prp_prinfo.pri_address + buf.prp_prinfo.pri_size
+        if nxt <= addr:
+            break
+        addr = nxt
+    return out
+
+
+# ────────────────────────── 扫描与解析 ──────────────────────────
+
+
+# 源文件：volfree/scan.py
 
 
 def run(cmd: list[str], timeout: float = 20.0) -> tuple[int, str, str]:
@@ -292,11 +506,9 @@ def run(cmd: list[str], timeout: float = 20.0) -> tuple[int, str, str]:
     except OSError as exc:
         return 1, "", str(exc)
 
-
 # lsof 字段输出的体积上限。几十万文件的挂载点足以把 subprocess.run 的
 # 全量缓冲吃满内存；超限即截断并降级结论，绝不当作完整扫描。
 LSOF_OUTPUT_LIMIT = 32 * 1024 * 1024
-
 
 def capture_bounded(cmd: list[str], limit: int = LSOF_OUTPUT_LIMIT,
                     timeout: float = 30.0) -> tuple[int, bytes, str, bool, bool]:
@@ -364,7 +576,6 @@ def capture_bounded(cmd: list[str], limit: int = LSOF_OUTPUT_LIMIT,
             pass
     return code, bytes(out), err.decode("utf-8", "replace"), state["truncated"], timed_out
 
-
 # ────────────────────────────── 卷枚举 ──────────────────────────────
 _MOUNT_RE = re.compile(r"^(/dev/\S+) on (.+) \(([^)]*)\)$")
 
@@ -375,7 +586,6 @@ _SYSTEM_MOUNT_PREFIXES = (
     "/private/var/",
     "/dev",
 )
-
 
 def parse_mount_output(text: str) -> list[tuple[str, str, str]]:
     """从 mount 输出解析出 (device, mountpoint, options)，过滤系统卷。
@@ -395,7 +605,6 @@ def parse_mount_output(text: str) -> list[tuple[str, str, str]]:
         result.append((device, mountpoint, opts))
     return result
 
-
 def read_volume_info(device: str) -> dict:
     """读取 diskutil info -plist 的结构化信息；失败返回空字典。"""
     code, out, _ = run(["diskutil", "info", "-plist", device])
@@ -406,7 +615,6 @@ def read_volume_info(device: str) -> dict:
     except Exception:
         return {}
 
-
 _parent_info_cache: dict[str, dict] = {}
 
 # 分区设备名 → 整盘设备名。BSD 命名规则：disk4s1 属于 disk4。
@@ -414,12 +622,10 @@ _parent_info_cache: dict[str, dict] = {}
 # 两次 diskutil 可以同时发起。
 _PARTITION_DEV_RE = re.compile(r"^(/dev/disk\d+)s\d+$")
 
-
 def _derive_parent_device(device: str) -> Optional[str]:
     """从分区设备名推整盘设备名（/dev/disk4s1 → /dev/disk4）。推不出返回 None。"""
     m = _PARTITION_DEV_RE.match(device)
     return m.group(1) if m else None
-
 
 def _fetch_volume_infos(devices: Iterable[str]) -> dict[str, dict]:
     """并发读取多个设备的 `diskutil info -plist`，返回 {设备: info}。
@@ -441,13 +647,11 @@ def _fetch_volume_infos(devices: Iterable[str]) -> dict[str, dict]:
         results = list(pool.map(read_volume_info, unique))
     return dict(zip(unique, results))
 
-
 def _parent_info(device: str) -> dict:
     """读取整盘信息（带缓存，避免同一父盘被多个分区重复查询）。"""
     if device not in _parent_info_cache:
         _parent_info_cache[device] = read_volume_info(device)
     return _parent_info_cache[device]
-
 
 def _volume_flags(info: dict) -> tuple[bool, bool, bool]:
     """从 diskutil info 结果推断 (external, ejectable, virtual)。
@@ -481,7 +685,6 @@ def _volume_flags(info: dict) -> tuple[bool, bool, bool]:
 
     ejectable = bool(pick("Ejectable", False))
     return external, ejectable, virtual
-
 
 def list_volumes(include_internal: bool = False) -> list[Volume]:
     """枚举候选卷。默认只保留外接或可推出的卷。"""
@@ -538,7 +741,6 @@ def list_volumes(include_internal: bool = False) -> list[Volume]:
         volumes.append(vol)
     return volumes
 
-
 def resolve_volume(target: str, include_internal: bool = False) -> Optional[Volume]:
     """按卷名、挂载点或设备号匹配目标卷。"""
     volumes = list_volumes(include_internal=include_internal)
@@ -552,7 +754,6 @@ def resolve_volume(target: str, include_internal: bool = False) -> Optional[Volu
         if tl in v.display.lower() or tl in v.mountpoint.lower():
             return v
     return None
-
 
 # ────────────────────────────── lsof 解析 ──────────────────────────────
 def parse_lsof_field_output(raw: bytes) -> list[Blocker]:
@@ -598,7 +799,6 @@ def parse_lsof_field_output(raw: bytes) -> list[Blocker]:
                     current_handle.link_count = None
     return [b for b in blockers if b.handles]
 
-
 def scan_blockers(volume: Volume) -> tuple[list[Blocker], list[str]]:
     """扫描卷上的占用进程。返回 (占用列表, 告警信息)。"""
     warnings: list[str] = []
@@ -627,7 +827,7 @@ def scan_blockers(volume: Volume) -> tuple[list[Blocker], list[str]]:
         # 必须降级：此时的「未发现占用」不等于「可以拔」。
         volume.scan_complete = False
         warnings.append(
-            f"lsof 输出超过 {human_size(LSOF_OUTPUT_LIMIT)} 上限，已截断；"
+            f"lsof 输出超过 {LSOF_OUTPUT_LIMIT // (1024 * 1024)}MB 上限，已截断；"
             "本次扫描不完整，不能据此判定可以拔出"
         )
 
@@ -694,7 +894,6 @@ def scan_blockers(volume: Volume) -> tuple[list[Blocker], list[str]]:
 
     return blockers, warnings
 
-
 def path_exists(path: str) -> Optional[bool]:
     """校验路径是否存在。True 存在，False 已删除，None 无法判定。
 
@@ -713,7 +912,6 @@ def path_exists(path: str) -> Optional[bool]:
     except OSError:
         return None
 
-
 # ────────────────────────────── 运行环境 ──────────────────────────────
 # 探测「完全磁盘访问」所需的受保护路径：任一可读即视为已授权。
 FDA_PROBE_FILES = (
@@ -722,7 +920,6 @@ FDA_PROBE_FILES = (
     "~/Library/Application Support/com.apple.TCC/TCC.db",
     "/Library/Application Support/com.apple.TCC/TCC.db",
 )
-
 
 def detect_access_level() -> tuple[str, str]:
     """判定当前进程能看到多大范围的进程。
@@ -755,7 +952,6 @@ def detect_access_level() -> tuple[str, str]:
         return "limited", "未获完全磁盘访问，仅能看到本用户进程"
     return "unknown", "无法判定权限范围"
 
-
 @dataclass
 class EnvClue:
     """lsof 之外的旁证。用于弥补普通用户看不到 root 进程的盲区。"""
@@ -763,7 +959,6 @@ class EnvClue:
     label: str
     detail: str
     warn: bool = False
-
 
 def collect_clues(vol: Volume) -> list[EnvClue]:
     """采集环境线索。
@@ -802,263 +997,25 @@ def collect_clues(vol: Volume) -> list[EnvClue]:
     return clues
 
 
-# ────────────────────────────── 进程信息（libproc） ──────────────────────────────
-class ProcBsdInfo(ctypes.Structure):
-    """libproc.h 的 struct proc_bsdinfo 子集，仅取需要的字段。"""
-
-    _fields_ = [
-        ("pbi_flags", ctypes.c_uint32),
-        ("pbi_status", ctypes.c_uint32),
-        ("pbi_xstatus", ctypes.c_uint32),
-        ("pbi_pid", ctypes.c_uint32),
-        ("pbi_ppid", ctypes.c_uint32),
-        ("pbi_uid", ctypes.c_uint32),
-        ("pbi_gid", ctypes.c_uint32),
-        ("pbi_ruid", ctypes.c_uint32),
-        ("pbi_rgid", ctypes.c_uint32),
-        ("pbi_svuid", ctypes.c_uint32),
-        ("pbi_svgid", ctypes.c_uint32),
-        ("rfu_1", ctypes.c_uint32),
-        ("pbi_comm", ctypes.c_char * 16),
-        ("pbi_name", ctypes.c_char * 32),
-        ("pbi_nfiles", ctypes.c_uint32),
-        ("pbi_pgid", ctypes.c_uint32),
-        ("pbi_pjobc", ctypes.c_uint32),
-        ("e_tdev", ctypes.c_uint32),
-        ("e_tpgid", ctypes.c_uint32),
-        ("pbi_nice", ctypes.c_int32),
-        ("pbi_start_tvsec", ctypes.c_uint64),
-        ("pbi_start_tvusec", ctypes.c_uint64),
-    ]
+# ────────────────────────── 风险定级 ──────────────────────────
 
 
-PROC_PIDTBSDINFO = 3
-PROC_PIDPATHINFO_MAXSIZE = 4096
-
-# 文件映射区的保护位。lsof 对映射文件报的 fd=txt 条目 access 恒为空，
-# 拿不到「能不能写」；proc_pidinfo 能拿到，实测与 vmmap 的 rw-/rwx、r--/r-x 一致。
-PROC_PIDREGIONPATHINFO = 8
-VM_PROT_WRITE = 0x2
-MAXPATHLEN = 1024
+# 源文件：volfree/policy.py
 
 
-class VinfoStat(ctypes.Structure):
-    """struct vinfo_stat，只为对齐 struct vnode_info 的布局，字段不参与判定。"""
+# 绝不允许结束的进程（按可执行路径尾部匹配）
+PROTECTED_EXECUTABLES = {
+    "/sbin/launchd",
+    "/usr/libexec/launchd",
+    "/System/Library/CoreServices/WindowServer",
+    "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Support/mds",
+}
 
-    _fields_ = [
-        ("vst_dev", ctypes.c_uint32),
-        ("vst_mode", ctypes.c_uint16),
-        ("vst_nlink", ctypes.c_uint16),
-        ("vst_ino", ctypes.c_uint64),
-        ("vst_uid", ctypes.c_uint32),
-        ("vst_gid", ctypes.c_uint32),
-        ("vst_atime", ctypes.c_int64),
-        ("vst_atimensec", ctypes.c_int64),
-        ("vst_mtime", ctypes.c_int64),
-        ("vst_mtimensec", ctypes.c_int64),
-        ("vst_ctime", ctypes.c_int64),
-        ("vst_ctimensec", ctypes.c_int64),
-        ("vst_birthtime", ctypes.c_int64),
-        ("vst_birthtimensec", ctypes.c_int64),
-        ("vst_size", ctypes.c_int64),
-        ("vst_blocks", ctypes.c_int64),
-        ("vst_blksize", ctypes.c_int32),
-        ("vst_flags", ctypes.c_uint32),
-        ("vst_gen", ctypes.c_uint32),
-        ("vst_rdev", ctypes.c_uint32),
-        ("vst_qspare", ctypes.c_int64 * 2),
-    ]
+# 系统级辅助进程：终止后由 launchd 自动重启，通常无害，但可能影响系统功能
+SYSTEM_HELPER_HINTS = ("/System/Library/", "/usr/libexec/", "/usr/sbin/")
 
-
-class VnodeInfoPath(ctypes.Structure):
-    """struct vnode_info + vip_path。"""
-
-    _fields_ = [
-        ("vip_stat", VinfoStat),
-        ("vip_type", ctypes.c_int),
-        ("vip_pad", ctypes.c_int),
-        ("vip_fsid", ctypes.c_int32 * 2),
-        ("vip_path", ctypes.c_char * MAXPATHLEN),
-    ]
-
-
-class ProcRegionInfo(ctypes.Structure):
-    """struct proc_regioninfo。"""
-
-    _fields_ = [
-        ("pri_protection", ctypes.c_uint32),
-        ("pri_max_protection", ctypes.c_uint32),
-        ("pri_inheritance", ctypes.c_uint32),
-        ("pri_flags", ctypes.c_uint32),
-        ("pri_offset", ctypes.c_uint64),
-        ("pri_behavior", ctypes.c_uint32),
-        ("pri_user_wired_count", ctypes.c_uint32),
-        ("pri_user_tag", ctypes.c_uint32),
-        ("pri_pages_resident", ctypes.c_uint32),
-        ("pri_pages_shared_now_private", ctypes.c_uint32),
-        ("pri_pages_swapped_out", ctypes.c_uint32),
-        ("pri_pages_dirtied", ctypes.c_uint32),
-        ("pri_ref_count", ctypes.c_uint32),
-        ("pri_shadow_depth", ctypes.c_uint32),
-        ("pri_share_mode", ctypes.c_uint32),
-        ("pri_private_pages_resident", ctypes.c_uint32),
-        ("pri_shared_pages_resident", ctypes.c_uint32),
-        ("pri_obj_id", ctypes.c_uint32),
-        ("pri_depth", ctypes.c_uint32),
-        ("pri_address", ctypes.c_uint64),
-        ("pri_size", ctypes.c_uint64),
-    ]
-
-
-class ProcRegionWithPathInfo(ctypes.Structure):
-    """struct proc_regionwithpathinfo，实测 1272 字节。"""
-
-    _fields_ = [
-        ("prp_prinfo", ProcRegionInfo),
-        ("prp_vip", VnodeInfoPath),
-    ]
-
-
-RUSAGE_INFO_V2 = 2
-
-
-class RusageInfoV2(ctypes.Structure):
-    """struct rusage_info_v2，实测 160 字节。
-
-    只为了拿 `ri_diskio_byteswritten`——进程累计写盘字节数。
-    界面用它做差商得到写入速率，比按文件大小猜可靠：
-    mmap 写入不改变文件长度，看 size 永远是零增长。
-    """
-
-    _fields_ = [
-        ("ri_uuid", ctypes.c_uint8 * 16),
-        ("ri_user_time", ctypes.c_uint64),
-        ("ri_system_time", ctypes.c_uint64),
-        ("ri_pkg_idle_wkups", ctypes.c_uint64),
-        ("ri_interrupt_wkups", ctypes.c_uint64),
-        ("ri_pageins", ctypes.c_uint64),
-        ("ri_wired_size", ctypes.c_uint64),
-        ("ri_resident_size", ctypes.c_uint64),
-        ("ri_phys_footprint", ctypes.c_uint64),
-        ("ri_proc_start_abstime", ctypes.c_uint64),
-        ("ri_proc_exit_abstime", ctypes.c_uint64),
-        ("ri_child_user_time", ctypes.c_uint64),
-        ("ri_child_system_time", ctypes.c_uint64),
-        ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
-        ("ri_child_interrupt_wkups", ctypes.c_uint64),
-        ("ri_child_pageins", ctypes.c_uint64),
-        ("ri_child_elapsed_abstime", ctypes.c_uint64),
-        ("ri_diskio_bytesread", ctypes.c_uint64),
-        ("ri_diskio_byteswritten", ctypes.c_uint64),
-    ]
-
-
-def proc_diskio_written(pid: int) -> Optional[int]:
-    """进程累计写盘字节数。取不到返回 None（界面按「未知」处理，不显示速率）。"""
-    lib = _get_libproc()
-    if not lib:
-        return None
-    if not hasattr(lib, "proc_pid_rusage"):
-        return None
-    lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-    lib.proc_pid_rusage.restype = ctypes.c_int
-    info = RusageInfoV2()
-    if lib.proc_pid_rusage(pid, RUSAGE_INFO_V2, ctypes.byref(info)) != 0:
-        return None
-    return int(info.ri_diskio_byteswritten)
-
-
-_libproc = None
-
-
-def _get_libproc():
-    global _libproc
-    if _libproc is None:
-        name = ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib"
-        try:
-            lib = ctypes.CDLL(name, use_errno=True)
-            lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-            lib.proc_pidpath.restype = ctypes.c_int
-            lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
-                                         ctypes.c_void_p, ctypes.c_int]
-            lib.proc_pidinfo.restype = ctypes.c_int
-            _libproc = lib
-        except OSError:
-            _libproc = False
-    return _libproc or None
-
-
-def proc_executable_path(pid: int) -> str:
-    """取进程可执行文件绝对路径；失败返回空串。"""
-    lib = _get_libproc()
-    if not lib:
-        return ""
-    buf = ctypes.create_string_buffer(PROC_PIDPATHINFO_MAXSIZE)
-    n = lib.proc_pidpath(pid, buf, PROC_PIDPATHINFO_MAXSIZE)
-    return buf.value.decode("utf-8", "replace") if n > 0 else ""
-
-
-def proc_start_time(pid: int) -> int:
-    """取进程启动时间（epoch 秒）；失败返回 0。用于防止 PID 复用误杀。"""
-    lib = _get_libproc()
-    if not lib:
-        return 0
-    info = ProcBsdInfo()
-    n = lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info),
-                         ctypes.sizeof(info))
-    return int(info.pbi_start_tvsec) if n > 0 else 0
-
-
-def proc_uid(pid: int) -> int:
-    lib = _get_libproc()
-    if not lib:
-        return -1
-    info = ProcBsdInfo()
-    n = lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info),
-                         ctypes.sizeof(info))
-    return int(info.pbi_uid) if n > 0 else -1
-
-
-def scan_writable_mappings(pid: int) -> dict[str, bool]:
-    """列出该进程所有文件映射区，返回 {路径: 是否可写}。
-
-    lsof 对映射文件报的 fd=txt 条目，access 字段恒为空，读不出「能不能写」。
-    这里直接问内核：遍历该进程的映射区，取 pri_protection 的写位。
-    实测与 vmmap 的 rw-/rwx、r--/r-x 逐字一致。
-
-    取不到（进程已退出、权限不足）时返回空字典，调用方必须把它当成
-    「未知」，不得当成「只读」。
-    """
-    lib = _get_libproc()
-    if not lib:
-        return {}
-    buf = ProcRegionWithPathInfo()
-    size = ctypes.sizeof(buf)
-    addr = 0
-    out: dict[str, bool] = {}
-    while True:
-        n = lib.proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, addr,
-                             ctypes.byref(buf), size)
-        if n <= 0:
-            # 走到最后一个区域后必然返回一次 EINVAL，属正常终止
-            break
-        path = buf.prp_vip.vip_path.decode("utf-8", "replace")
-        if path:
-            writable = bool(buf.prp_prinfo.pri_protection & VM_PROT_WRITE)
-            for key in (path, os.path.realpath(path)):
-                out[key] = out.get(key, False) or writable
-        nxt = buf.prp_prinfo.pri_address + buf.prp_prinfo.pri_size
-        if nxt <= addr:
-            break
-        addr = nxt
-    return out
-
-
-# ────────────────────────────── 风险定级 ──────────────────────────────
-# 定级规则写成数据表，不再写成 if 链：改判定时只动这张表，
-# 不必在一串嵌套分支里判断「我插的位置对不对」。
-# **顺序即优先级**，先命中先返回；不要按「看起来更严重」重排。
-
+# 会被系统按需重启的 UI 辅助类扩展（缩略图 / QuickLook / Finder 扩展）
+RESTARTABLE_APPEX_HINTS = (".appex/", "QuickLook", "Thumbnail", "Thumb")
 
 @dataclass(frozen=True)
 class Rule:
@@ -1074,22 +1031,17 @@ class Rule:
     reason: str
     when: Callable[[Blocker, int], bool]
 
-
 def _has_protected_identity(b: Blocker, self_pid: int) -> bool:
     return b.pid in (0, 1, self_pid) or b.exe in PROTECTED_EXECUTABLES
-
 
 def _is_restartable_appex(b: Blocker, self_pid: int) -> bool:
     return any(hint in b.exe for hint in RESTARTABLE_APPEX_HINTS)
 
-
 def _is_system_helper_readonly(b: Blocker, self_pid: int) -> bool:
     return b.only_read and any(b.exe.startswith(p) for p in SYSTEM_HELPER_HINTS)
 
-
 def _has_cwd_handle(b: Blocker, self_pid: int) -> bool:
     return any(h.fd == "cwd" for h in b.handles)
-
 
 ASSESS_RULES: tuple[Rule, ...] = (
     Rule("A1", "pid∈{0,1,自身} 或 exe∈PROTECTED_EXECUTABLES", "NEVER",
@@ -1128,8 +1080,8 @@ ASSESS_RULES: tuple[Rule, ...] = (
 
 # A9：没有任何规则命中时的兜底
 FALLBACK_LEVEL = "CAUTION"
-FALLBACK_REASON = "占用状态无法完全判定，建议先尝试正常退出该程序"
 
+FALLBACK_REASON = "占用状态无法完全判定，建议先尝试正常退出该程序"
 
 def _assess_level(blocker: Blocker, self_pid: Optional[int] = None) -> Blocker:
     """给单个占用进程定级并给出理由。
@@ -1153,7 +1105,6 @@ def _assess_level(blocker: Blocker, self_pid: Optional[int] = None) -> Blocker:
     blocker.reason = FALLBACK_REASON
     return blocker
 
-
 def _apply_uid_policy(b: Blocker) -> Blocker:
     """标注「属于其他用户」的进程——本工具无权终止，不必等到 EPERM 才发现。
 
@@ -1173,10 +1124,15 @@ def _apply_uid_policy(b: Blocker) -> Blocker:
                 "如需释放需以 root 权限处理")
     return b
 
-
 def assess(blocker: Blocker, self_pid: Optional[int] = None) -> Blocker:
     """定级 + 权限标注。判定语义见 `_assess_level`。"""
     return _apply_uid_policy(_assess_level(blocker, self_pid))
+
+
+# ────────────────────────── 诊断组装 ──────────────────────────
+
+
+# 源文件：volfree/assess.py
 
 
 def enrich_and_assess(blockers: Iterable[Blocker]) -> list[Blocker]:
@@ -1190,13 +1146,143 @@ def enrich_and_assess(blockers: Iterable[Blocker]) -> list[Blocker]:
     result.sort(key=lambda x: (-LEVEL_ORDER.get(x.level, 2), x.pid))
     return result
 
-
 def diagnose(vol: Volume) -> tuple[list[Blocker], list[str], tuple[str, str], list[EnvClue]]:
     """完整诊断：扫描 + 定级 + 权限判定 + 环境线索。"""
     blockers, warnings = scan_blockers(vol)
     blockers = enrich_and_assess(blockers)
     return blockers, warnings, detect_access_level(), collect_clues(vol)
 
+
+# ────────────────────────── JSON 输出 ──────────────────────────
+
+
+# 源文件：volfree/payload.py
+
+
+def classify_kind(b: Blocker) -> str:
+    exe = b.exe
+    if ".appex/" in exe:
+        return "系统扩展"
+    if exe.startswith("/System/Library/CoreServices/Finder.app"):
+        return "访达"
+    base = os.path.basename(exe).lower()
+    # 解释器与 shell 优先于路径判定：/usr/bin/python3 更可能是用户脚本而非守护进程
+    if base.startswith(("python", "node", "ruby", "perl", "php")):
+        return "脚本进程"
+    if base in ("zsh", "bash", "fish", "sh", "tcsh", "ksh", "dash") or \
+            b.command in ("Terminal", "iTerm2"):
+        return "终端"
+    if exe.startswith(("/System/", "/usr/", "/bin/", "/sbin/")):
+        return "系统进程"
+    if "/Applications/" in exe:
+        return "用户应用"
+    return "其他"
+
+def blocker_payload(b: Blocker) -> dict:
+    """单个占用进程的机器可读描述。
+
+    `flags` 是给界面用的：界面不该去解析 `reason` 里的中文来判断「是不是在放弃写入」。
+    判定结果只有一处来源（assess），界面只负责把布尔翻成文案。
+    """
+    return {
+        "pid": b.pid, "command": b.command, "exe": b.exe, "uid": b.uid,
+        "start_time": b.start_time, "level": b.level, "reason": b.reason,
+        # 累计写盘字节数。界面用两次采样的差商算速率——
+        # 只有「正在写」的进程才有意义，其余一律给 None，免得界面把
+        # 启动时的读盘算成写入。
+        "diskio_written": proc_diskio_written(b.pid) if b.has_write else None,
+        "flags": {
+            "has_write": b.has_write,
+            "all_writes_unlinked": b.all_writes_unlinked,
+            "has_unlinked_write": b.has_unlinked_write,
+            "has_uncertain_write": b.has_uncertain_write,
+            "all_deleted": b.all_deleted,
+            "only_read": b.only_read,
+            # 属于其他用户：界面据此提示「需 root 权限」，而不是把按钮点出一个失败
+            "other_user": b.other_user,
+        },
+        "handles": [
+            {"fd": h.fd, "access": h.access, "type": h.ftype,
+             "name": h.name, "exists": h.exists,
+             "write_state": h.write_state}
+            for h in b.handles
+        ],
+    }
+
+def volume_payload(vol: Volume, blockers: list[Blocker], warnings: list[str],
+                   access: tuple[str, str] = ("unknown", ""),
+                   clues: Optional[list[EnvClue]] = None) -> dict:
+    counts = {"NEVER": 0, "RISKY": 0, "CAUTION": 0, "SAFE": 0}
+    for b in blockers:
+        counts[b.level] = counts.get(b.level, 0) + 1
+    return {
+        "version": VERSION,
+        "volume": {
+            "device": vol.device, "mountpoint": vol.mountpoint, "name": vol.display,
+            "fstype": vol.fstype, "external": vol.external, "virtual": vol.virtual,
+            "ejectable": vol.ejectable, "removable": vol.removable,
+            "total_bytes": vol.total_bytes, "free_bytes": vol.free_bytes,
+        },
+        "access": {"level": access[0], "description": access[1]},
+        "summary": {
+            "total": len(blockers),
+            "never": counts["NEVER"], "risky": counts["RISKY"],
+            "caution": counts["CAUTION"], "safe": counts["SAFE"],
+            "writing": sum(1 for b in blockers if b.has_write),
+            # 会被放弃的写入次数：界面据此决定主按钮要不要先软确认
+            "abandoned_writes": sum(1 for b in blockers if b.all_writes_unlinked),
+            # 扫描是否完整。False 时界面必须降级——空列表不等于「没有占用」
+            "complete": vol.scan_complete,
+        },
+        "blockers": [blocker_payload(b) for b in blockers],
+        "clues": [{"label": c.label, "detail": c.detail, "warn": c.warn} for c in (clues or [])],
+        "warnings": warnings,
+    }
+
+def blockers_to_json(vol: Volume, blockers: list[Blocker], warnings: list[str],
+                     access: tuple[str, str] = ("unknown", ""),
+                     clues: Optional[list[EnvClue]] = None) -> str:
+    payload = volume_payload(vol, blockers, warnings, access, clues)
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+# ────────────────────────── 终端输出 ──────────────────────────
+
+
+# 源文件：volfree/render.py
+
+
+# ────────────────────────────── 输出辅助 ──────────────────────────────
+class Palette:
+    """ANSI 配色；非 tty 或 --no-color 时全部降级为空串。"""
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def _wrap(self, code: str, text: str) -> str:
+        return f"\033[{code}m{text}\033[0m" if self.enabled else text
+
+    def bold(self, t: str) -> str:
+        return self._wrap("1", t)
+
+    def dim(self, t: str) -> str:
+        return self._wrap("2", t)
+
+    def green(self, t: str) -> str:
+        return self._wrap("32", t)
+
+    def yellow(self, t: str) -> str:
+        return self._wrap("33", t)
+
+    def red(self, t: str) -> str:
+        return self._wrap("31", t)
+
+    def cyan(self, t: str) -> str:
+        return self._wrap("36", t)
+
+    def level(self, lv: str, text: str) -> str:
+        return {"SAFE": self.green, "CAUTION": self.yellow,
+                "RISKY": self.red, "NEVER": self.red}[lv](text)
 
 # ────────────────────────────── 报告渲染 ──────────────────────────────
 def human_size(n: int) -> str:
@@ -1210,17 +1296,14 @@ def human_size(n: int) -> str:
         val /= 1024
     return f"{n} B"
 
-
 def disp_width(text: str) -> int:
     """按终端显示宽度计算字符串宽度（CJK 全角字符占两列）。"""
     return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
-
 
 def pad(text: str, width: int, right: bool = False) -> str:
     """按显示宽度补空格，保证中英文混排的表格列对齐。"""
     gap = max(0, width - disp_width(text))
     return (" " * gap + text) if right else (text + " " * gap)
-
 
 def describe_handle(h: Handle) -> str:
     if h.is_deleted:
@@ -1232,7 +1315,6 @@ def describe_handle(h: Handle) -> str:
     acc = {"r": "只读", "w": "写入", "u": "读写"}.get(h.access, "权限未知")
     kind = {"REG": "文件", "DIR": "目录"}.get(h.ftype, h.ftype or "未知")
     return f"fd {h.fd} · {kind} · {acc} · {state}"
-
 
 def render_report(vol: Volume, blockers: list[Blocker], warnings: list[str],
                   pal: Palette, access: tuple[str, str] = ("unknown", ""),
@@ -1362,94 +1444,10 @@ def render_report(vol: Volume, blockers: list[Blocker], warnings: list[str],
     return "\n".join(lines)
 
 
-def classify_kind(b: Blocker) -> str:
-    exe = b.exe
-    if ".appex/" in exe:
-        return "系统扩展"
-    if exe.startswith("/System/Library/CoreServices/Finder.app"):
-        return "访达"
-    base = os.path.basename(exe).lower()
-    # 解释器与 shell 优先于路径判定：/usr/bin/python3 更可能是用户脚本而非守护进程
-    if base.startswith(("python", "node", "ruby", "perl", "php")):
-        return "脚本进程"
-    if base in ("zsh", "bash", "fish", "sh", "tcsh", "ksh", "dash") or \
-            b.command in ("Terminal", "iTerm2"):
-        return "终端"
-    if exe.startswith(("/System/", "/usr/", "/bin/", "/sbin/")):
-        return "系统进程"
-    if "/Applications/" in exe:
-        return "用户应用"
-    return "其他"
+# ────────────────────────── 处置与命令 ──────────────────────────
 
 
-def blocker_payload(b: Blocker) -> dict:
-    """单个占用进程的机器可读描述。
-
-    `flags` 是给界面用的：界面不该去解析 `reason` 里的中文来判断「是不是在放弃写入」。
-    判定结果只有一处来源（assess），界面只负责把布尔翻成文案。
-    """
-    return {
-        "pid": b.pid, "command": b.command, "exe": b.exe, "uid": b.uid,
-        "start_time": b.start_time, "level": b.level, "reason": b.reason,
-        # 累计写盘字节数。界面用两次采样的差商算速率——
-        # 只有「正在写」的进程才有意义，其余一律给 None，免得界面把
-        # 启动时的读盘算成写入。
-        "diskio_written": proc_diskio_written(b.pid) if b.has_write else None,
-        "flags": {
-            "has_write": b.has_write,
-            "all_writes_unlinked": b.all_writes_unlinked,
-            "has_unlinked_write": b.has_unlinked_write,
-            "has_uncertain_write": b.has_uncertain_write,
-            "all_deleted": b.all_deleted,
-            "only_read": b.only_read,
-            # 属于其他用户：界面据此提示「需 root 权限」，而不是把按钮点出一个失败
-            "other_user": b.other_user,
-        },
-        "handles": [
-            {"fd": h.fd, "access": h.access, "type": h.ftype,
-             "name": h.name, "exists": h.exists,
-             "write_state": h.write_state}
-            for h in b.handles
-        ],
-    }
-
-
-def volume_payload(vol: Volume, blockers: list[Blocker], warnings: list[str],
-                   access: tuple[str, str] = ("unknown", ""),
-                   clues: Optional[list[EnvClue]] = None) -> dict:
-    counts = {"NEVER": 0, "RISKY": 0, "CAUTION": 0, "SAFE": 0}
-    for b in blockers:
-        counts[b.level] = counts.get(b.level, 0) + 1
-    return {
-        "version": VERSION,
-        "volume": {
-            "device": vol.device, "mountpoint": vol.mountpoint, "name": vol.display,
-            "fstype": vol.fstype, "external": vol.external, "virtual": vol.virtual,
-            "ejectable": vol.ejectable, "removable": vol.removable,
-            "total_bytes": vol.total_bytes, "free_bytes": vol.free_bytes,
-        },
-        "access": {"level": access[0], "description": access[1]},
-        "summary": {
-            "total": len(blockers),
-            "never": counts["NEVER"], "risky": counts["RISKY"],
-            "caution": counts["CAUTION"], "safe": counts["SAFE"],
-            "writing": sum(1 for b in blockers if b.has_write),
-            # 会被放弃的写入次数：界面据此决定主按钮要不要先软确认
-            "abandoned_writes": sum(1 for b in blockers if b.all_writes_unlinked),
-            # 扫描是否完整。False 时界面必须降级——空列表不等于「没有占用」
-            "complete": vol.scan_complete,
-        },
-        "blockers": [blocker_payload(b) for b in blockers],
-        "clues": [{"label": c.label, "detail": c.detail, "warn": c.warn} for c in (clues or [])],
-        "warnings": warnings,
-    }
-
-
-def blockers_to_json(vol: Volume, blockers: list[Blocker], warnings: list[str],
-                     access: tuple[str, str] = ("unknown", ""),
-                     clues: Optional[list[EnvClue]] = None) -> str:
-    payload = volume_payload(vol, blockers, warnings, access, clues)
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+# 源文件：volfree/cli.py
 
 
 # ────────────────────────────── 处置 ──────────────────────────────
@@ -1464,7 +1462,6 @@ def ask(prompt: str, assume_yes: bool = False) -> bool:
     except (EOFError, KeyboardInterrupt):
         print()
         return False
-
 
 def pid_holds_volume(pid: int, mountpoint: str) -> Optional[bool]:
     """复核：该进程此刻是否仍持有指定挂载点上的句柄。
@@ -1493,7 +1490,6 @@ def pid_holds_volume(pid: int, mountpoint: str) -> Optional[bool]:
                 return True
     return False
 
-
 def verify_identity(b: Blocker) -> tuple[bool, str]:
     """终止前复核：PID 仍存活、启动时间与可执行路径均未变，且仍持有同一个卷。"""
     if b.start_time:
@@ -1516,7 +1512,6 @@ def verify_identity(b: Blocker) -> tuple[bool, str]:
             return False, "无法复核该进程与本卷的绑定关系，为安全起见跳过"
     return True, ""
 
-
 def send_signal(b: Blocker, sig: int) -> tuple[bool, str]:
     try:
         os.kill(b.pid, sig)
@@ -1527,7 +1522,6 @@ def send_signal(b: Blocker, sig: int) -> tuple[bool, str]:
         return False, "权限不足（该进程属于其他用户或受系统保护）"
     except OSError as exc:
         return False, str(exc)
-
 
 def release_volume(vol: Volume, blockers: list[Blocker], apply: bool,
                    assume_yes: bool, force: bool, force_unmount: bool,
@@ -1631,7 +1625,6 @@ def release_volume(vol: Volume, blockers: list[Blocker], apply: bool,
         print(pal.dim(f"  如确认无写入，可加 --force-unmount 强制{label}。"))
     return 2
 
-
 # ────────────────────────────── CLI ──────────────────────────────
 def pick_volume_interactive(pal: Palette) -> Optional[Volume]:
     volumes = list_volumes()
@@ -1652,7 +1645,6 @@ def pick_volume_interactive(pal: Palette) -> Optional[Volume]:
     except (ValueError, EOFError, KeyboardInterrupt):
         return None
 
-
 def cmd_list(args, pal: Palette) -> int:
     volumes = list_volumes(include_internal=args.all)
     if not volumes:
@@ -1663,7 +1655,6 @@ def cmd_list(args, pal: Palette) -> int:
                  "可推出" if v.ejectable else "不可推出"]
         print(f"{v.display}\t{v.device}\t{v.mountpoint}\t{' · '.join(flags)}")
     return 0
-
 
 def cmd_analyze(args, pal: Palette) -> int:
     vol = resolve_volume(args.volume, include_internal=args.all) if args.volume else pick_volume_interactive(pal)
@@ -1677,7 +1668,6 @@ def cmd_analyze(args, pal: Palette) -> int:
         print(render_report(vol, blockers, warnings, pal, access, clues))
     return 0 if not blockers else 1
 
-
 def cmd_release(args, pal: Palette) -> int:
     vol = resolve_volume(args.volume, include_internal=args.all) if args.volume else pick_volume_interactive(pal)
     if not vol:
@@ -1687,7 +1677,6 @@ def cmd_release(args, pal: Palette) -> int:
     print(render_report(vol, blockers, warnings, pal, access, clues))
     return release_volume(vol, blockers, apply=args.apply, assume_yes=args.yes,
                           force=args.force, force_unmount=args.force_unmount, pal=pal)
-
 
 # ────────────────────────────── 面向界面的动作 ──────────────────────────────
 def _action_result(args, pal: Palette, *, ok: bool, code: int, action: str,
@@ -1705,7 +1694,6 @@ def _action_result(args, pal: Palette, *, ok: bool, code: int, action: str,
         mark = pal.green("✓") if ok else pal.yellow("!")
         print(f"  {mark} {message}")
     return code
-
 
 def cmd_status(args, pal: Palette) -> int:
     """一次报告所有候选卷，供界面轮询。比逐卷 analyze 少一半进程启动开销。"""
@@ -1732,7 +1720,6 @@ def cmd_status(args, pal: Palette) -> int:
         print(f"{v['name']}\t{v['device']}\t占用 {s['total']} · "
               f"危险 {s['risky']} · 谨慎 {s['caution']} · 安全 {s['safe']}")
     return 0
-
 
 def cmd_watch(args, pal: Palette) -> int:
     """只回答「这些挂载点现在有没有人占着」，供菜单栏图标在面板关闭时更新。
@@ -1790,7 +1777,6 @@ def cmd_watch(args, pal: Palette) -> int:
 
     print(json.dumps({"version": VERSION, "volumes": reports}, ensure_ascii=False))
     return 0
-
 
 def cmd_end(args, pal: Palette) -> int:
     """结束单个进程，不碰挂载状态。
@@ -1852,7 +1838,6 @@ def cmd_end(args, pal: Palette) -> int:
     return _action_result(args, pal, ok=True, code=0, action="end", pid=pid,
                           alive=False, message=f"已结束 {target.command}")
 
-
 def cmd_eject(args, pal: Palette) -> int:
     """只做推出/卸载，不动任何进程。界面绿态主按钮用。"""
     vol = (resolve_volume(args.volume, include_internal=args.all) if args.volume
@@ -1890,7 +1875,6 @@ def cmd_eject(args, pal: Palette) -> int:
 
     return _action_result(args, pal, ok=False, code=2, action="eject",
                           message=f"{label}失败：{detail}")
-
 
 def cmd_doctor(args, pal: Palette) -> int:
     """环境自检：把「结果是否可信」的前提条件摆出来。"""
@@ -1937,7 +1921,6 @@ def cmd_doctor(args, pal: Palette) -> int:
         print(pal.dim("  日常使用建议在「系统设置 → 隐私与安全性 → 完全磁盘访问」中给终端授权；"))
         print(pal.dim("  或临时用 sudo volfree analyze \"<卷名>\" 获取完整结果。"))
     return 0
-
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -1996,7 +1979,6 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("--force", action="store_true", help="SIGTERM 无效时允许 SIGKILL")
     sr.add_argument("--force-unmount", action="store_true", help="推出/卸载失败时允许强制（会跳过刷盘，有写入句柄时拒绝执行）")
     return p
-
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
