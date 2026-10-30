@@ -25,8 +25,8 @@ cp "$BIN" "$APP/Contents/MacOS/Volfree"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp ../volfree.py "$APP/Contents/Resources/volfree.py"
 
-# 版本号只认一个来源：volfree.py 里的 VERSION。
-# 原先 Resources/Info.plist 写死 0.1.0，和 CLI 的 0.3.0 对不上，发版时两个数字会打架。
+# 版本号只认一个来源：volfree.py 里的 VERSION（它又来自 volfree/models.py）。
+# 别在 Info.plist 里写死版本——发版时两个数字会打架，这个坑踩过一次。
 VER=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' ../volfree.py)
 if [ -n "$VER" ]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" "$APP/Contents/Info.plist"
