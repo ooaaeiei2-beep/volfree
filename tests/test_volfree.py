@@ -1015,6 +1015,34 @@ class TestOtherUserPolicy(unittest.TestCase):
         self.assertFalse(b.other_user)
 
 
+class TestAssessRules(unittest.TestCase):
+    """P1-2：定级写成数据表后，顺序本身就是优先级，必须有测试钉住。"""
+
+    def test_rule_order_is_the_priority(self):
+        self.assertEqual([r.name for r in vf.ASSESS_RULES],
+                         ["A1", "A2", "A2b", "A3", "A4", "A5", "A6", "A7", "A8"])
+
+    def test_a2_precedes_a2b(self):
+        """全部可写句柄都无名时，即使含 unknown 也不该升 RISKY。"""
+        names = [r.name for r in vf.ASSESS_RULES]
+        self.assertLess(names.index("A2"), names.index("A2b"))
+
+    def test_every_rule_is_well_formed(self):
+        for r in vf.ASSESS_RULES:
+            self.assertIn(r.level, vf.LEVEL_ORDER, r.name)
+            self.assertTrue(r.reason.strip(), r.name)
+            self.assertTrue(r.condition.strip(), r.name)
+
+    def test_fallback_level_is_caution(self):
+        self.assertEqual(vf.FALLBACK_LEVEL, "CAUTION")
+
+    def test_rule_table_matches_documented_priorities(self):
+        """受保护进程必须最先判，四格在系统辅助之前。"""
+        names = [r.name for r in vf.ASSESS_RULES]
+        self.assertEqual(names[0], "A1")
+        self.assertLess(names.index("A4"), names.index("A6"))
+
+
 class _Args:
     """给 cmd_watch 用的最小参数对象（它只读 `volume`）。"""
 
