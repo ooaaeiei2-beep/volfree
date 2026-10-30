@@ -120,18 +120,25 @@ lsof 对 mmap 文件报的 `fd=txt` 条目 access 恒为空，得用
 
 | 路径 | 内容 |
 |---|---|
-| `volfree.py` | 全部判定逻辑（约 1800 行，零依赖） |
+| `volfree/` | 源码包：`scan` 扫描解析、`policy` 定级规则、`render` 输出、`cli` 命令分发等 8 个模块 |
+| `volfree.py` | 单文件 CLI（约 2000 行，零依赖）——**由 `tools/bundle.py` 从 `volfree/` 生成，不要直接编辑** |
 | `app/` | 菜单栏应用（SwiftUI + AppKit，SPM 构建）——**细节看 [app/README.md](app/README.md)** |
 | `docs/` | 判定依据与 22 例基准表；`docs/img/` 是 README 里的示意图 |
 | `design/` | 面板原型（HTML）与版式检查脚本 |
 | `experiments/` | 造测试场景的脚本（mmap 写入、已删除文件、各种文件系统） |
-| `tests/` | 86 项单元测试 |
+| `tests/` | 109 项单元测试 |
 
 ## 测试
 
 ```sh
 python3 -m unittest discover -s tests -p "test_*.py"
 python3 experiments/matrix.py      # 22 例判定矩阵
+```
+
+改了 `volfree/` 里的模块之后，记得重新生成单文件——app 和 `curl | sh` 读的都是它：
+
+```sh
+python3 tools/bundle.py
 ```
 
 ## 已知限制
