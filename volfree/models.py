@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 
 # ────────────────────────────── 风险等级 ──────────────────────────────

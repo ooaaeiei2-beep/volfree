@@ -3,7 +3,7 @@
 移动硬盘「**现在能不能安全拔**」——拔了会不会丢数据。macOS 菜单栏应用 + 单文件命令行工具。
 
 <p align="center">
-  <a href="https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/Volfree-0.3.1.dmg"><b>下载 Volfree-0.3.1.dmg</b></a><br>
+  <a href="https://github.com/ooaaeiei2-beep/volfree/releases/latest/download/Volfree-0.4.0.dmg"><b>下载 Volfree-0.4.0.dmg</b></a><br>
   <sub>约 1.1 MB · macOS 14 或更新 · 打开 dmg，把 Volfree 拖进「应用程序」</sub>
 </p>
 
@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/main/install
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/main/install.sh | less
 # 或者钉住某个版本，而不是跟着 main 走：
-curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/v0.3.1/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ooaaeiei2-beep/volfree/v0.4.0/install.sh | sh
 ```
 
 ### 跳过那三步：清隔离属性

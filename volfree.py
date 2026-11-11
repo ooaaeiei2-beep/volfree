@@ -59,7 +59,7 @@ from typing import Callable, Iterable, Optional
 # 源文件：volfree/models.py
 
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 # ────────────────────────────── 风险等级 ──────────────────────────────
 # SAFE    零风险，终止不会丢失任何数据
