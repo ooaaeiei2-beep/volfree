@@ -182,6 +182,10 @@ enum Metrics {
     static let cornerRadius: CGFloat = 14
     static let primaryHeight: CGFloat = 30
     static let rowHeight: CGFloat = 32
+    /// 卷条单行高度：卷名 + 挂载点/设备号两行文字。
+    static let volumeRowHeight: CGFloat = 38
+    /// 卷条最多常驻 4 行，再多滚动，避免插满盘时面板无限长。
+    static let volumeStripMaxHeight: CGFloat = volumeRowHeight * 4
     /// 区块之间（卡片↔按钮↔横线↔底栏）的呼吸位。
     /// 原型里这几处都是 11pt，实现必须一致，否则按钮会贴到横线上。
     static let sectionGap: CGFloat = 11

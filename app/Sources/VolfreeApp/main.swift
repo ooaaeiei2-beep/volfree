@@ -290,6 +290,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
                 self?.model.refresh()
             }
+            // 多盘回归钩子：模拟「用户选中某块盘」「某块盘挂着软确认」，
+            // 用来核对切卷后确认卡不会串台、按钮目标不会错位。
+            // 排在补采之后，确保 reports 已经就位。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
+                guard let self else { return }
+                let env = ProcessInfo.processInfo.environment
+                if let d = env["VOLFREE_SELECT_DEVICE"], !d.isEmpty {
+                    self.log("模拟选中卷 device=\(d)")
+                    self.model.select(device: d)
+                }
+                if let d = env["VOLFREE_SIMULATE_CONFIRM"], !d.isEmpty {
+                    self.log("模拟软确认 device=\(d)")
+                    self.model.simulateConfirm(for: d)
+                }
+            }
             // 默认 3.2s 出图；要核对「卡片到点自动收起」就把这个值调大
             let delay = Double(ProcessInfo.processInfo.environment["VOLFREE_RENDER_DELAY"] ?? "") ?? 3.2
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -319,22 +334,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func renderSnapshot(to path: String) {
         let wantsSettings = ProcessInfo.processInfo.environment["VOLFREE_RENDER_SETTINGS"] == "1"
         if ProcessInfo.processInfo.environment["VOLFREE_EXPAND"] == "1" {
-            model.expanded = true
+            model.expandCurrentForRender()
         }
-        // 把这次要呈现的文字照原样打出来，核对文案不用靠肉眼猜图
-        if let e = model.ejected {
-            log("渲染：正在显示「已推出」卡片 name=\(e.name)")
+        // 把这次要呈现的文字照原样打出来，核对文案不用靠肉眼猜图。
+        // 多盘时逐卷打印，避免只看到 current 那块而漏掉状态串台。
+        for e in model.ejectedList {
+            log("渲染：已推出通知 name=\(e.name) device=\(e.device)")
         }
-        if let report = model.current {
-            log("渲染：卷=\(report.volume.name) 等级=\(report.tone) 共 \(report.summary.total) 个进程")
+        log("渲染：共 \(model.reports.count) 块卷 当前=\(model.current?.volume.name ?? "无")"
+            + " 全局色调=\(model.displayTone)")
+        for report in model.reports {
+            let s = model.state(for: report.volume.device)
+            let selected = report.volume.device == model.current?.volume.device
+            log("渲染：卷=\(report.volume.name) device=\(report.volume.device) 等级=\(report.tone)"
+                + " 选中=\(selected) 共 \(report.summary.total) 个进程"
+                + " 展开=\(s.expanded) 软确认=\(s.pendingEjectConfirm)")
             for blocker in report.blockers {
                 log("  进程 \(blocker.command) pid=\(blocker.pid) 标签=「\(blocker.tag.text)」"
                     + " diskio=\(blocker.diskioWritten.map(String.init) ?? "nil")"
-                    + " 速率=\(model.rateText(blocker.pid) ?? "（无）")")
+                    + " 速率=\(model.rateText(blocker, in: report) ?? "（无）")")
             }
-        } else {
-            log("渲染：没有可展示的卷")
         }
+        if model.reports.isEmpty { log("渲染：没有可展示的卷") }
         let root = AnyView(
             Group {
                 if wantsSettings {

@@ -3,6 +3,13 @@ import Foundation
 // volfree 的 JSON 契约。字段名与 volfree.py 的 volume_payload() 一一对应。
 // 界面只读这些机器字段，不去解析 reason 里的中文文案。
 
+/// 写入速率采样的键。
+/// 同一 pid 可能同时持有多块盘的句柄，只按 pid 索引会让两块盘的速率互相覆盖。
+struct BlockerKey: Hashable {
+    let device: String
+    let pid: Int32
+}
+
 struct AccessInfo: Codable, Equatable {
     let level: String
     let desc: String
@@ -207,6 +214,16 @@ struct StatusPayload: Codable, Equatable {
     let version: String
     let access: AccessInfo
     let volumes: [VolumeReport]
+
+    /// 全体卷里最危险的那个等级。菜单栏图标用它，与用户当前选中哪块盘无关。
+    /// 面板关闭时 `WatchPayload.tone` 也是这个语义，两处必须一致。
+    var globalTone: Tone {
+        var worst: Tone = .safe
+        for report in volumes where report.tone.severity > worst.severity {
+            worst = report.tone
+        }
+        return worst
+    }
 }
 
 /// `watch --json` 的返回：只回答「这些挂载点现在有没有人占着」。
@@ -226,7 +243,8 @@ struct WatchPayload: Decodable, Equatable {
         let writing: Int
     }
 
-    /// 多块盘时取最危险的那个，与面板里「先看哪块」的规则一致。
+    /// 多块盘时取最危险的那个，与 `StatusPayload.globalTone` 同一套规则。
+    /// 面板打开/关闭两条通道都用它，图标不会随用户切换选中的卷而变色。
     var tone: Tone {
         if volumes.contains(where: { $0.tone == "danger" }) { return .danger }
         if volumes.contains(where: { $0.tone == "caution" }) { return .caution }

@@ -9,16 +9,23 @@ struct PopoverView: View {
             header
             divider
 
-            // 主体自带底部呼吸位：主按钮、进程列表都收在这一块里，
-            // 少了这一句按钮会直接贴在下面的横线上。
-            //
-            // 这里必须用 VStack 而不是 Group：reportBody 返回的是「判定卡 + 主按钮 + …」
-            // 一组视图，Group 上的 modifier 会逐个作用到每个子视图上，
-            // 结果判定卡与按钮之间被塞了两份间距。
+            // 多块盘时常驻卷条：每块盘的状态一眼可见，不用点开下拉菜单猜。
+            if model.reports.count > 1 {
+                volumeStrip
+                divider
+            }
+
+            // 「已推出」只是一条通知，不再把整个面板占满。
+            if !model.ejectedList.isEmpty {
+                ejectedNotices
+            }
+
+            // 主体自带底部呼吸位：主按钮、进程列表都收在这一块里。
+            // 这里必须用 VStack 而不是 Group：Group 上的 modifier 会逐个
+            // 作用到每个子视图，结果判定卡与按钮之间被塞了两份间距。
             VStack(alignment: .leading, spacing: 0) {
-                if let ejected = model.ejected {
-                    ejectedBody(ejected)
-                } else if let report = model.current {
+                if let report = model.current {
+                    identityBar(report)
                     reportBody(report)
                 } else {
                     emptyBody
@@ -59,54 +66,151 @@ struct PopoverView: View {
                 )
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 13, weight: .semibold))
+                Text("volfree").font(.system(size: 13, weight: .semibold))
+                Text(headerSubtitle).font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 4)
+        .padding(.bottom, 11)
+    }
+
+    private var headerSubtitle: String {
+        let n = model.reports.count
+        if n == 0 { return "没有检测到可推出的磁盘" }
+        return n == 1 ? "1 块磁盘" : "共 \(n) 块磁盘"
+    }
+
+    // MARK: - 卷条
+
+    /// 常驻总览。行高固定、最多显示 4 行，再多可滚动——
+    /// 用明确的 frame 高度而不是让 ScrollView 自己算，否则离屏渲染时 fittingSize 会压成 0。
+    private var volumeStrip: some View {
+        let visibleRows = Int(Metrics.volumeStripMaxHeight / Metrics.volumeRowHeight)
+        let overflow = max(0, model.reports.count - visibleRows)
+        return VStack(spacing: 0) {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    ForEach(model.reports) { report in
+                        volumeRow(report)
+                    }
+                }
+            }
+            .frame(height: min(CGFloat(model.reports.count) * Metrics.volumeRowHeight,
+                               Metrics.volumeStripMaxHeight))
+            // 限高之后必须说明「还有几块」，否则用户不知道下面还能滚
+            if overflow > 0 {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.down").font(.system(size: 9))
+                    Text("还有 \(overflow) 块，向下滚动查看")
+                        .font(.system(size: 10.5))
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 4)
+            }
+        }
+        .padding(.vertical, 3)
+    }
+
+    private func volumeRow(_ report: VolumeReport) -> some View {
+        let selected = report.volume.device == model.current?.volume.device
+        let tone = report.tone.palette(for: scheme)
+        return Button {
+            model.select(device: report.volume.device)
+        } label: {
+            HStack(spacing: 7) {
+                // 左侧竖条 + 浅底 + 「当前」胶囊，三重选中标识。
+                // 卷条滚动后选中行可能滑出视野，所以详情区还有身份条兜底。
+                Rectangle()
+                    .fill(selected ? Metrics.accent(scheme) : Color.clear)
+                    .frame(width: 3, height: Metrics.volumeRowHeight - 10)
+                    .clipShape(RoundedRectangle(cornerRadius: 1.5))
+
+                Circle().fill(tone.foreground).frame(width: 8, height: 8)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(report.volume.name)
+                        .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                        .lineLimit(1).truncationMode(.middle)
+                    // 卷名会重复（两块盘都叫 Untitled），挂载点 + 设备号才是唯一标识。
+                    Text(Self.deviceLine(report.volume))
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text(stripStatus(report))
+                    .font(.system(size: 10.5, weight: selected ? .medium : .regular))
+                    .foregroundStyle(selected ? tone.foreground : Color.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity)
+            .frame(height: Metrics.volumeRowHeight)
+            .background(RoundedRectangle(cornerRadius: 6).fill(
+                selected ? Metrics.accent(scheme).opacity(0.10) : Color.clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func stripStatus(_ report: VolumeReport) -> String {
+        if report.scanIncomplete { return "扫描不完整" }
+        switch report.tone {
+        case .danger:
+            return "写入中 · \(report.summary.risky)"
+        case .caution:
+            if report.summary.abandonedWrites > 0 {
+                return "\(report.summary.abandonedWrites) 次放弃写入"
+            }
+            return "\(report.summary.total) 个程序 · 只读"
+        case .safe:
+            return model.isLimitedAccess ? "未发现占用" : "无占用"
+        }
+    }
+
+    /// 卷条副行：挂载点 + 去掉 /dev/ 的设备号。
+    private static func deviceLine(_ v: VolumeInfo) -> String {
+        return "\(v.mountpoint) · \(shortDevice(v))"
+    }
+
+    private static func shortDevice(_ v: VolumeInfo) -> String {
+        return v.device.replacingOccurrences(of: "/dev/", with: "")
+    }
+
+    // MARK: - 详情区身份条
+
+    /// 操作对象的第二重确认：动作区正上方始终写明当前是哪块盘。
+    /// 与卷条选中行、主按钮文案取自同一个 VolumeReport，不会出现三处不一致。
+    private func identityBar(_ report: VolumeReport) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(report.volume.name)
+                    .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1).truncationMode(.middle)
-                Text(subtitle).font(.system(size: 11))
+                Text("\(report.volume.metaLine) · \(Self.shortDevice(report.volume))")
+                    .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if model.reports.count > 1 {
-                volumeSwitcher
+                Text("当前")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Metrics.accent(scheme))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Metrics.accent(scheme).opacity(0.12)))
             }
         }
-        .padding(.horizontal, 4)
-        .padding(.bottom, 11)
-    }
-
-    private var title: String {
-        if let e = model.ejected { return e.name }
-        return model.current?.volume.name ?? "volfree"
-    }
-
-    private var subtitle: String {
-        if model.ejected != nil { return "已推出" }
-        return model.current?.volume.metaLine ?? "没有检测到可推出的磁盘"
-    }
-
-    private var volumeSwitcher: some View {
-        Menu {
-            ForEach(model.reports) { report in
-                Button {
-                    model.selectedDevice = report.volume.device
-                } label: {
-                    if report.volume.device == model.current?.volume.device {
-                        Label(report.volume.name, systemImage: "checkmark")
-                    } else {
-                        Text(report.volume.name)
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: "chevron.up.chevron.down")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .frame(width: 18)
-        .help("切换磁盘")
+        .padding(.top, Metrics.sectionGap)
+        .padding(.horizontal, 2)
     }
 
     private var divider: some View {
@@ -120,16 +224,21 @@ struct PopoverView: View {
 
     @ViewBuilder
     private func reportBody(_ report: VolumeReport) -> some View {
+        let s = model.state(for: report.volume.device)
         verdict(report)
         primaryButton(report)
+        targetLine(report)
 
-        if model.pendingEjectConfirm {
+        // 双保险：软确认只在真的有「放弃写入」时才成立。
+        // 即便哪天状态被别处错误置位，也不能对一块没有放弃写入的盘
+        // 弹出「会放弃 1 次写入」这种凭空编出来的文案。
+        if s.pendingEjectConfirm && report.summary.abandonedWrites > 0 {
             softConfirm(report)
         }
 
         if report.summary.total > 0 {
             disclose(report)
-            if model.expanded {
+            if s.expanded {
                 processList(report)
             }
         }
@@ -161,7 +270,7 @@ struct PopoverView: View {
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tone.background))
-        .padding(.top, Metrics.sectionGap)
+        .padding(.top, 8)
         .padding(.bottom, Metrics.sectionGap)
     }
 
@@ -194,7 +303,7 @@ struct PopoverView: View {
             let risky = report.blockers.filter { $0.level == "RISKY" }
             if risky.count == 1 {
                 let blocker = risky[0]
-                if let rate = model.rateText(blocker.pid) {
+                if let rate = model.rateText(blocker, in: report) {
                     return "\(blocker.command) 正在写入 \(rate)"
                 }
                 return "\(blocker.command) 正在写入，结束会留下半写的文件"
@@ -203,16 +312,17 @@ struct PopoverView: View {
         }
     }
 
-    @ViewBuilder
     private func primaryButton(_ report: VolumeReport) -> some View {
         let tone = report.tone
         // 扫描不完整时不允许一键推出：可能还有没扫到的写入进程
         let disabled = tone == .danger || model.busy || report.scanIncomplete
-        Button {
-            model.primaryAction()
+        return Button {
+            model.primaryAction(report)
         } label: {
             Text(primaryLabel(report))
                 .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
                 .frame(maxWidth: .infinity)
                 .frame(height: Metrics.primaryHeight)
                 .foregroundStyle(disabled ? Color.secondary : Color.white)
@@ -225,31 +335,49 @@ struct PopoverView: View {
         .disabled(disabled)
     }
 
+    /// 按钮文案内嵌卷名：手指点下去的那一刻就能确认动作对象。
     private func primaryLabel(_ report: VolumeReport) -> String {
+        let name = report.volume.name
         if model.busy { return "正在处理…" }
         if report.scanIncomplete { return "扫描不完整" }
         switch report.tone {
-        case .safe: return "推出"
+        case .safe: return "推出「\(name)」"
         case .caution:
-            return report.summary.abandonedWrites > 0 ? "结束并推出" : "安全结束并推出"
+            return report.summary.abandonedWrites > 0
+                ? "结束并推出「\(name)」" : "安全结束并推出「\(name)」"
         case .danger: return "等待完成"
         }
+    }
+
+    /// 第三重确认：卷名可能重复或过长被截断，设备号 + 挂载点始终完整可读。
+    /// 它同时也是 `Runner.eject/end` 实际传入的 device，显示即参数。
+    private func targetLine(_ report: VolumeReport) -> some View {
+        return Text("目标 \(Self.shortDevice(report.volume)) · \(report.volume.mountpoint)")
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 5)
     }
 
     private func softConfirm(_ report: VolumeReport) -> some View {
         let tone = report.tone.palette(for: scheme)
         let n = report.summary.abandonedWrites
+        let name = report.volume.name
         let question = n > 1
-            ? "会放弃 \(n) 次写入，且这些文件已无名字、无法从别处找回。"
-            : "会放弃 1 次写入，且该文件已无名字、无法从别处找回。"
+            ? "「\(name)」会放弃 \(n) 次写入，且这些文件已无名字、无法从别处找回。"
+            : "「\(name)」会放弃 1 次写入，且该文件已无名字、无法从别处找回。"
         return VStack(alignment: .leading, spacing: 8) {
             Text(question)
                 .font(.system(size: 11.5))
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 6) {
                 Spacer(minLength: 0)
-                smallButton("取消", filled: true) { model.cancelPendingEject() }
-                smallButton("仍然结束", danger: true) { model.primaryAction() }
+                smallButton("取消", filled: true) {
+                    model.cancelPendingEject(for: report.volume.device)
+                }
+                smallButton("仍然结束", danger: true) { model.primaryAction(report) }
             }
         }
         .padding(.vertical, 9)
@@ -266,14 +394,15 @@ struct PopoverView: View {
     }
 
     private func disclose(_ report: VolumeReport) -> some View {
-        Button {
-            model.expanded.toggle()
-            if !model.expanded { model.confirmingPID = nil }
+        let device = report.volume.device
+        let expanded = model.state(for: device).expanded
+        return Button {
+            model.toggleExpanded(for: device)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 8, weight: .semibold))
-                    .rotationEffect(.degrees(model.expanded ? 90 : 0))
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
                 Text(report.tone == .danger
                      ? "仍要结束…"
                      : "查看 \(report.summary.total) 个程序")
@@ -290,13 +419,15 @@ struct PopoverView: View {
     }
 
     private func processList(_ report: VolumeReport) -> some View {
-        ScrollView {
+        let device = report.volume.device
+        let confirmingPID = model.state(for: device).confirmingPID
+        return ScrollView {
             VStack(spacing: 0) {
                 ForEach(report.blockers) { blocker in
-                    if model.confirmingPID == blocker.pid {
-                        confirmRow(blocker)
+                    if confirmingPID == blocker.pid {
+                        confirmRow(blocker, report)
                     } else {
-                        processRow(blocker)
+                        processRow(blocker, report)
                     }
                 }
             }
@@ -306,9 +437,9 @@ struct PopoverView: View {
         .padding(.top, 2)
     }
 
-    private func processRow(_ blocker: BlockerInfo) -> some View {
-        let tag = tagOf(blocker)
-        let tone = report_tone()
+    private func processRow(_ blocker: BlockerInfo, _ report: VolumeReport) -> some View {
+        let tag = tagOf(blocker, in: report)
+        let tone = report.tone.palette(for: scheme)
         return HStack(spacing: 8) {
             RoundedRectangle(cornerRadius: 4, style: .continuous)
                 .fill(iconColor(blocker))
@@ -338,7 +469,9 @@ struct PopoverView: View {
                 )
 
             if blocker.level == "RISKY" || blocker.flags.allWritesUnlinked {
-                Button("结束…") { model.confirmingPID = blocker.pid }
+                Button("结束…") {
+                    model.setConfirmingPID(blocker.pid, for: report.volume.device)
+                }
                     .buttonStyle(.plain)
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
@@ -350,15 +483,11 @@ struct PopoverView: View {
         .frame(height: Metrics.rowHeight)
     }
 
-    private func report_tone() -> Tone.Palette {
-        (model.current?.tone ?? .caution).palette(for: scheme)
-    }
-
     /// 标签文案。正在写的进程带上速率——用户据此判断还要等多久，
     /// 而不是被笼统告知「有风险」。
-    private func tagOf(_ blocker: BlockerInfo) -> (text: String, emphasized: Bool, warning: Bool) {
+    private func tagOf(_ blocker: BlockerInfo, in report: VolumeReport) -> (text: String, emphasized: Bool, warning: Bool) {
         let base = blocker.tag
-        guard blocker.flags.hasWrite, let rate = model.rateText(blocker.pid) else {
+        guard blocker.flags.hasWrite, let rate = model.rateText(blocker, in: report) else {
             return base
         }
         return (base.text + " " + rate, base.emphasized, base.warning)
@@ -377,20 +506,23 @@ struct PopoverView: View {
         return Color(.sRGB, red: 0.29, green: 0.56, blue: 0.85, opacity: 1)
     }
 
-    private func confirmRow(_ blocker: BlockerInfo) -> some View {
+    private func confirmRow(_ blocker: BlockerInfo, _ report: VolumeReport) -> some View {
         let abandoned = blocker.flags.allWritesUnlinked
+        let name = report.volume.name
         let question = abandoned
-            ? "结束 \(blocker.command)？会放弃这次写入，该文件已无名字、无法找回。"
-            : "结束 \(blocker.command)？未保存的内容会丢失。"
+            ? "结束 \(blocker.command)？「\(name)」上的这次写入会被放弃，文件已无名字、无法找回。"
+            : "结束 \(blocker.command)？「\(name)」上未保存的内容会丢失。"
         return VStack(alignment: .leading, spacing: 8) {
             Text(question)
                 .font(.system(size: 11.5))
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 6) {
                 Spacer(minLength: 0)
-                smallButton("取消", filled: true) { model.confirmingPID = nil }
+                smallButton("取消", filled: true) {
+                    model.setConfirmingPID(nil, for: report.volume.device)
+                }
                 smallButton("结束", danger: true) {
-                    model.endProcess(blocker, allowRisky: blocker.level == "RISKY")
+                    model.endProcess(blocker, in: report, allowRisky: blocker.level == "RISKY")
                 }
             }
         }
@@ -425,23 +557,29 @@ struct PopoverView: View {
 
     // MARK: - 已推出 / 空态
 
-    private func ejectedBody(_ ejected: AppModel.EjectedState) -> some View {
+    private var ejectedNotices: some View {
         let tone = Tone.safe.palette(for: scheme)
-        return VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                Circle().fill(tone.foreground).frame(width: 9, height: 9)
-                Text("已推出").font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(tone.foreground)
+        return VStack(spacing: 4) {
+            ForEach(model.ejectedList) { e in
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(tone.foreground)
+                    Text("「\(e.name)」已推出 · 可以安全拔线")
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(e.deviceLabel)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(tone.background))
             }
-            Text("可以安全拔线").font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 17)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tone.background))
-        .padding(.top, Metrics.sectionGap)
+        .padding(.top, 6)
     }
 
     private var emptyBody: some View {
