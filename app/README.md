@@ -352,13 +352,14 @@ icns 元素类型，没有统一解法。
 | `VOLFREE_RENDER_SETTINGS=1` | 配合上一项，改为渲染设置窗口 |
 | `VOLFREE_EXPAND=1` | 配合渲染，默认展开进程列表 |
 | `VOLFREE_RENDER_DELAY=<秒>` | 出图时间，默认 3.2；核对「到点自动收起」时调大 |
-| `VOLFREE_SIMULATE_EJECT=<名字>` | 没有真盘也能摆出「已推出」卡片，仅配合渲染用 |
+| `VOLFREE_SIMULATE_EJECT=<名字>` | 没有真盘也能摆出「已推出」通知条，仅配合渲染用（设备号是占位符） |
 | `VOLFREE_FORCE_TONE=caution\|danger` | 钉住菜单栏色调，没有真实告警也能核对黄/红两态 |
 | `VOLFREE_DUMP_STATUS_ICON=<png>` | 把菜单栏图标落盘查像素（菜单栏截不了图） |
 | `VOLFREE_OPEN_PANEL=1` | 启动后自动弹出面板，用于测量"使用时"的真实占用 |
 
 `VOLFREE_RENDER` 是为**没有录屏权限**的环境准备的：它渲染的就是真实视图代码，
-不是另画一套。`shots/` 里的图就是这么来的。
+不是另画一套。`shots/` 里绝大多数图就是这么来的；只有 `12-多盘.png` 把数据源换成了
+模拟多卷 JSON，渲染的仍是同一个视图。
 
 ```sh
 VOLFREE_RENDER=/tmp/x.png build/Volfree.app/Contents/MacOS/Volfree
@@ -441,7 +442,8 @@ VOLFREE_RENDER_SETTINGS=1 VOLFREE_RENDER=/tmp/s.png build/Volfree.app/Contents/M
 
 ## 截图
 
-`shots/` 里的图都是 `VOLFREE_RENDER` 真机渲染的，不是设计稿。
+`shots/` 里的图都是 `VOLFREE_RENDER` 渲染真实视图得到的，不是设计稿；
+唯一例外是 `12-多盘.png`——本机没插三块真盘，卷数据由 `experiments/fake_volumes.py` 提供。
 
 重渲全部图只要一条命令：
 
@@ -479,12 +481,18 @@ python3 compose_shots.py       # 重建 四态对照 / 06 / 07 / 11-图标
 | `06-绿-权限受限与设置.png` | 权限受限时绿态文案降级 + 设置窗口登录项置灰 |
 | `07-红-写入速率.png` | 红态收起/展开，带真实速率 |
 | `08-按钮压线-前后.png` | 主按钮与底栏横线的间距修复前后 |
-| `09-已推出.png` | 旧版推出后的全屏确认卡片（6 秒后自动收起）；现改为卷条下方的通知条，其余盘始终可见 |
+| `09-已推出.png` | 推出后的一次性通知条（6 秒后自动收起），其余盘始终可见；由 `VOLFREE_SIMULATE_EJECT` 模拟，右侧 `simulated/…` 是占位设备号，真实使用时为 `diskNsX` |
 | `10-空态.png` | 没插盘 |
 | `11-图标.png` | `AppIcon.icns` 各档尺寸的预览（直接拆包内 icns，不另画） |
+| `12-多盘.png` | 三块磁盘时的常驻卷条与三重操作确认；卷名、容量来自 `experiments/fake_volumes.py` 的模拟数据 |
 | `四态对照.png` | 四态并排 |
 
 `06a/06b`、`07a/07b` 是拼 `06`、`07` 用的单张源图，留在目录里方便单独引用其中一张。
+
+`01`～`07` 用的是临时 APFS 卷 `VfShot`（200 MB），刚建好时 `diskutil` 报可用空间为
+`Zero KB`——这是临时卷的真实状态，不是软件读错；容量只用于显示，不参与判定。
+`12-多盘.png` 用 `experiments/fake_volumes.py` 喂模拟 JSON，渲染的仍是同一套真实
+`PopoverView`，`shots.sh` 末尾会自动生成它。
 
 ## 「已推出」为什么只有 6 秒
 

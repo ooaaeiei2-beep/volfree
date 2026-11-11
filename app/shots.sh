@@ -133,5 +133,10 @@ else
     echo "    跳过：没找到装了 PIL 的解释器（可用 VOLFREE_PYTHON_PIL 指定）" >&2
 fi
 
+echo "==> 12 多盘（模拟三卷，不依赖真盘）"
+# 真机只挂了一块 VfShot，多盘界面靠 experiments/fake_volumes.py 喂模拟 JSON。
+# 渲染的仍是真实 PopoverView，不是另画一张设计稿。
+render "12-多盘.png" VOLFREE_SCRIPT="$PWD/../experiments/fake_volumes.py" VOLFREE_FAKE_VOLUMES=3
+
 echo
 echo "完成。临时卷已卸载。"
